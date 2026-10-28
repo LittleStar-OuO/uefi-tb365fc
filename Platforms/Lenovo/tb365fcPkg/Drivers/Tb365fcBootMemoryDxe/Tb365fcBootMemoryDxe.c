@@ -9,7 +9,8 @@
   * publishes the initrd as a read-only block device, so a FAT image in the boot
     image's ramdisk shows up as a normal volume for UniXNU and DarwinBoot.
 
-  Nothing here depends on a hardware address; every range comes from the DT.
+  The device tree and initrd ranges come from the DT; mAvailableMemory is a
+  static list that still needs the device inventory (see below).
 
   Copyright (c) 2026, UniXNU contributors. All rights reserved.
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -44,10 +45,16 @@
 #define FDT_MAX_SIZE            (16 * SIZE_1MB)
 
 //
-// REQUIRED: this is a placeholder, not a measured TB365FC map. Replace it with the
-// ranges from the device's /proc/iomem, minus the firmware, FDT/initrd, secure-world,
-// modem/DSP/SMEM carveouts and the LK framebuffer. Until then the firmware allocator
-// may hand out reserved memory and the image MUST NOT be flashed to hardware.
+// The start is derived from this package's own windows: stack 0x40000000 +
+// 0x40000, FD 0x40080000 + 0x300000 and DXE heap 0x40380000 + 0x03C00000.
+// The end is 0x80000 below the measured iomem end of 0x23fffffff; that last
+// window stays out until its owner is known.
+//
+// REQUIRED: this single range still contains the stock reserved-memory
+// carveouts (TEE, modem/DSP/SMEM, framebuffer, ramoops) that /proc/iomem
+// reports as reserved. DarwinBoot receives this list, so the carveouts must be
+// reconciled with the device tree before the image is used on hardware; until
+// then the image MUST NOT be flashed.
 //
 // Keep the entries in ascending order.
 //

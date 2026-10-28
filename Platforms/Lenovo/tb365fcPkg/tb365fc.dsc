@@ -37,7 +37,9 @@
   #
   # DDR Memory
   #
-  # REQUIRED: 8 GiB at 0x40000000 is the announced configuration, not a measurement.
+  # Measured: MemTotal is 7,991,068 KiB and /proc/iomem ends at 0x23fffffff,
+  # i.e. 8 GiB from 0x40000000. The reserved-memory carveouts inside this
+  # window are described by the device tree, not by this PCD.
   gArmTokenSpaceGuid.PcdSystemMemoryBase|0x40000000
   gArmTokenSpaceGuid.PcdSystemMemorySize|0x200000000
 

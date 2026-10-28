@@ -12,7 +12,7 @@ in `UniXNU-tb365fc/tools`; nothing has been read from the tablet itself yet.
 | Data | Origin | Status |
 | --- | --- | --- |
 | CPU MPIDRs, GIC frames, timer, UART | stock `vendor_boot` base DTB | recorded in `mt6835.dtsi` |
-| DRAM base and size | announced 8 GiB | unverified; the stock DTB carries a 1 GiB LK stub |
+| DRAM base and size | `MemTotal` 7,991,068 kB and `/proc/iomem` ending at 0x23fffffff | measured; the stock DTB carries a 1 GiB LK stub |
 | Android header geometry | stock `vendor_boot` header | measured (tags/DTB 0x47C80000, ramdisk 0x66F00000, cmdline `bootopt=64S3,32N2,64N2`, pages 4096) |
 | FD base/size | Plan A convention (merlinx/camellia) | unverified on this LK |
 | Panel | stock `dtbo` overlay | BOE HX83122B or Tianma NT36532, video mode, 16:10; resolution unverified |
@@ -30,15 +30,18 @@ in `UniXNU-tb365fc/tools`; nothing has been read from the tablet itself yet.
      deliberately 2 because the stock v4 header carries no load addresses.
      Re-check all of them if the firmware package changes.
 2. `Platforms/Lenovo/tb365fcPkg/tb365fc.dsc`
-   - `PcdSystemMemoryBase/Size`, stack base/size, SMBIOS strings, framebuffer
-     mode, `PcdStorageIsEMMC`.
+   - `PcdSystemMemoryBase/Size` now match the measured 8 GiB; the stack
+     base/size, SMBIOS strings, framebuffer mode and `PcdStorageIsEMMC` still
+     need measurement.
 3. `Platforms/Lenovo/tb365fcPkg/Library/MemoryMapLib/MemoryMapLib.c`
    - Stack, FD and DXE heap carve-outs plus every MMIO window. GIC, MSDC-0 and
      MSDC Top-0 now match the stock DTB; the other windows are still the MT6833
      reference set and the TB365FC may move or resize any of them.
 4. `Platforms/Lenovo/tb365fcPkg/Drivers/Tb365fcBootMemoryDxe/Tb365fcBootMemoryDxe.c`
-   - `mAvailableMemory` is one invented 8 GiB range. DarwinBoot receives this
-     list, so an error here is fatal for the payload.
+   - `mAvailableMemory` is one contiguous range after the firmware windows and
+     ends 0x80000 below the measured iomem end. The reserved-memory carveouts
+     inside it are still not described. DarwinBoot receives this list, so an
+     error here is fatal for the payload.
 5. `Silicon/MediaTek/MT6835Pkg/Library/*`
    - Clock tree, GPIO numbering, PMIC wrapper and MSDC tables are still the
      MT6833 tables renamed to MT6835. Validate each one against the stock DTB
@@ -61,7 +64,8 @@ the tables above (see `UniXNU-tb365fc/tools/README.md`):
 3. Dump `dtbo`/`dtb` partitions, decompile them with `dtc -I dtb -O dts` and
    diff CPU, GIC, timer, memory and reserved-memory nodes against
    `Resources/DTBs/mt6835.dtsi`. CPU, GIC, timer, touch, panel and PMIC are
-   done; the memory and reserved-memory nodes still need the live tablet.
+   done; the memory node is measured (8 GiB at 0x40000000) and the
+   reserved-memory carveouts still need reconciliation with `iomem`.
 4. Read the stock GPT (`sgdisk --print`) for the userdata window and the
    partition that holds the boot image.
 5. Capture an LK/fastboot boot log to confirm the load addresses the
@@ -85,6 +89,14 @@ reference; if Plan A fails, adapt and validate them before use.
 `Resources/MuPatches/Camellia-Essential.patch` (GIC redistributor wake-up,
 DXE ordering) belongs to this route and is not applied by the UniXNU
 firmware step.
+
+## Mu patch application
+
+`build_uefi.py` applies the five Plan A patches (`AsmMacroLib`, `Auth-Service`,
+`Boot-Manager`, `Timer`, `Usb-Bus`) with `git apply --ignore-whitespace`: the
+Mu blobs are checked out with CRLF while the patch files use LF, so a plain
+`git apply` rejects every hunk. `Camellia-Essential.patch` is Plan B-only and
+is deliberately left out of the list; `module/README.md` says the same.
 
 ## Before publication
 

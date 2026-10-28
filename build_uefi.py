@@ -43,6 +43,20 @@ MU_PATH            = Path ("Common/Mu")
 MU_OEM_SAMPLE_PATH = Path ("Common/Mu_OEM_Sample")
 MU_BASECORE_PATH   = Path ("Mu_Basecore")
 
+#
+# MU Basecore Patches
+#
+# Camellia-Essential.patch belongs to the Plan B hot-jump (module/, BootImage/)
+# and is not part of the firmware build; see PORTING.md.
+#
+MU_BASECORE_PATCHES = [
+    "AsmMacroLib.patch",
+    "Auth-Service.patch",
+    "Boot-Manager.patch",
+    "Timer.patch",
+    "Usb-Bus.patch"
+]
+
 @dataclass
 class BuildContext:
     device:            str
@@ -161,9 +175,12 @@ def handle_git_patch (submodule_path: Path, patch_name: str, remove: bool) -> bo
     absolute_patch_path = str (patch_path.resolve ())
 
     # Set Git Command
+    # The Mu blobs are checked out with CRLF while the patch files use LF;
+    # without this every patch is rejected as whitespace-damaged.
     cmd = [
         "git",
         "apply",
+        "--ignore-whitespace",
         absolute_patch_path
     ]
 
@@ -171,8 +188,16 @@ def handle_git_patch (submodule_path: Path, patch_name: str, remove: bool) -> bo
     if remove:
         cmd.append ("-R")
 
-    # Apply/Undo Path
-    return subprocess.run (cmd, cwd=submodule_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    # Apply/Undo Patch
+    result = subprocess.run (cmd, cwd=submodule_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # Log Apply Failures, Silent for Undo Attempts on Unpatched Files
+    if result.returncode != 0 and not remove:
+        logger.error (f"Failed to Apply \"{patch_name}\" Git Patch:")
+        for line in (result.stderr or result.stdout).splitlines ():
+            logger.error (f"  {line}")
+
+    return result.returncode == 0
 
 def update_local_repo () -> bool:
     # Pull Latest Changes
@@ -406,7 +431,7 @@ def create_payload_file (ctx: BuildContext, payload_config: dict, append_boot_sh
 
 def create_output_image (ctx: BuildContext, config_data: dict, append_boot_shim: bool) -> bool:
     # Set Suffix Flag
-    add_output_suffix = add_output_suffix = "status" in config_data and "model_count" in config_data["status"]
+    add_output_suffix = "status" in config_data and "model_count" in config_data["status"]
 
     # Check Output Type
     match config_data:
@@ -492,7 +517,7 @@ def main ():
     cleanup_old_build (ctx.device, ctx.device_model, ctx.cleanup)
 
     # Remove Mu_Basecore Patches
-    for patch_name in ["AsmMacroLib.patch", "Auth-Service.patch", "Boot-Manager.patch", "Timer.patch", "Usb-Bus.patch", "Camellia-Essential.patch"]:
+    for patch_name in MU_BASECORE_PATCHES:
         handle_git_patch (MU_BASECORE_PATH, patch_name, True)
 
     # Update Local Repo
@@ -513,9 +538,8 @@ def main ():
         sys.exit (1)
 
     # Apply Mu_Basecore Patches
-    for patch_name in ["AsmMacroLib.patch", "Auth-Service.patch", "Boot-Manager.patch", "Timer.patch", "Usb-Bus.patch", "Camellia-Essential.patch"]:
+    for patch_name in MU_BASECORE_PATCHES:
         if not handle_git_patch (MU_BASECORE_PATH, patch_name, False):
-            logger.error (f"Failed to Apply \"{patch_name}\" Git Patch!")
             sys.exit (1)
 
     # Compile Device UEFI

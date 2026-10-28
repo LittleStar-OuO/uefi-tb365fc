@@ -10,6 +10,7 @@ BootImage/build
 bootpayload.bin
 BootShim.bin
 BootShim.elf
+Resources/DTBs/*.dtb
 
 Mu-*.*
 *:Zone.Identifier

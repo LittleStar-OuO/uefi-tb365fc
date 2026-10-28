@@ -14,6 +14,7 @@ typedef enum {
 typedef struct {
   MTK_PMIC_WRAPPER_REG RegMap[PmicWrapperMaxReg];
   BOOLEAN ArbCapabilities;
+  UINT8   SlaveId;
 } MTK_PMIC_WRAPPER_PLATFORM_INFO;
 
 extern MTK_PMIC_WRAPPER_PLATFORM_INFO gPlatformInfo;

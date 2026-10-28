@@ -47,12 +47,10 @@ ASM_FUNC (SetupExceptionLevel2)
 //
 // Cleans and invalidates every data cache level up to the Level of Coherence
 // by set/way (CLIDR_EL1 levels, CSSELR_EL1 to select, CCSIDR_EL1 geometry,
-// DC CISW). The previous stage ran with its caches on and leaves lines behind
-// that the UEFI, running with the MMU and caches off until ArmConfigureMmu,
-// never wrote: once the caches are on, those stale lines would hide the DRAM
-// contents (HOB tables, heap) written in between, or be written back over
-// them. Cleaning keeps what the previous stage wrote. Corrupts x0-x11;
-// callable with the MMU on or off.
+// DC CISW). The previous stage ran with its caches on and can leave lines
+// behind that would hide or overwrite what this stage writes with the MMU and
+// caches off. Cleaning keeps what the previous stage wrote. Corrupts x0-x11.
+// (From UniXNU/uefi-sheng.)
 //
 ASM_FUNC (SecCleanInvalidateDataCacheAll)
   dmb   sy

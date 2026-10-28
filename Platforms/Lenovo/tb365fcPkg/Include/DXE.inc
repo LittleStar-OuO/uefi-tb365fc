@@ -9,7 +9,11 @@
   INF MdeModulePkg/Universal/StatusCodeHandler/RuntimeDxe/StatusCodeHandlerRuntimeDxe.inf
   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
   INF EmbeddedPkg/EmbeddedMonotonicCounter/EmbeddedMonotonicCounter.inf
+  INF MdeModulePkg/Universal/SerialDxe/SerialDxe.inf
   INF EmbeddedPkg/SimpleTextInOutSerial/SimpleTextInOutSerial.inf
+  INF MediaTekPkg/Drivers/PmicWrapperDxe/PmicWrapperDxe.inf
+  INF SiliciumPkg/Drivers/KeypadDeviceDxe/KeypadDeviceDxe.inf
+  INF SiliciumPkg/Drivers/KeypadDxe/KeypadDxe.inf
   INF MdeModulePkg/Universal/ResetSystemRuntimeDxe/ResetSystemRuntimeDxe.inf
   INF EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf
   INF EmbeddedPkg/MetronomeDxe/MetronomeDxe.inf
@@ -26,22 +30,14 @@
   INF FatPkg/EnhancedFatDxe/Fat.inf
   INF MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf
 
-  INF tb365fcPkg/Drivers/Tb365fcBootMemoryDxe/Tb365fcBootMemoryDxe.inf
+  # Boot image ramdisk as a read-only block device (UniXNU payload volume)
+  INF tb365fcPkg/Drivers/BootRamdiskDxe/BootRamdiskDxe.inf
 
-  INF MediaTekPkg/Drivers/GpioDxe/GpioDxe.inf
-  INF MediaTekPkg/Drivers/ClockDxe/ClockDxe.inf
-  INF MediaTekPkg/Drivers/PmicWrapperDxe/PmicWrapperDxe.inf
-  INF MediaTekPkg/Drivers/MT6358PmicDxe/MT6358PmicDxe.inf
-
-  INF MediaTekPkg/Drivers/MsdcDxe/MsdcDxe.inf
-
-  INF MdeModulePkg/Bus/Sd/EmmcDxe/EmmcDxe.inf
-  INF MdeModulePkg/Bus/Sd/SdDxe/SdDxe.inf
+  # The XNU loader is part of the firmware volume (UniXNU "loader = firmware").
+  INF DarwinBootPkg/Driver/DarwinBoot.inf
 
 !if $(USE_CUSTOM_DISPLAY_DRIVER) == 0
   INF SiliciumPkg/Drivers/SimpleFbDxe/SimpleFbDxe.inf
 !endif
-  INF SiliciumPkg/Drivers/KeypadDeviceDxe/KeypadDeviceDxe.inf
-  INF SiliciumPkg/Drivers/KeypadDxe/KeypadDxe.inf
 
   INF MdeModulePkg/Universal/BdsDxe/BdsDxe.inf

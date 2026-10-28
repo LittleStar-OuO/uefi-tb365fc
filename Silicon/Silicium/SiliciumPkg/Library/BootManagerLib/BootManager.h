@@ -7,6 +7,9 @@ RegisterKeyCallback (IN EFI_DEVICE_PATH_PROTOCOL *DevicePath);
 VOID
 UnregisterKeyCallback ();
 
+VOID
+PollBootManagerKey ();
+
 BOOLEAN
 EnterBootManager ();
 

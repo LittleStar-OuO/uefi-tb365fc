@@ -1,5 +1,6 @@
 /** @file
-  Device tree and initrd memory, from the device tree the previous stage handed over.
+  Device tree, initrd and framebuffer memory, from the device tree the previous
+  stage handed over.
 
   The previous stage (LK) passes the physical address of a flattened device tree
   in x0, which SEC keeps in a HOB. This driver:
@@ -7,10 +8,21 @@
   * maps the tree and the initrd it names into the GCD as reserved memory, so
     every access is translated and no allocator can hand the ranges out;
   * publishes the initrd as a read-only block device, so a FAT image in the boot
-    image's ramdisk shows up as a normal volume for UniXNU and DarwinBoot.
+    image's ramdisk shows up as a normal volume for UniXNU and DarwinBoot;
+  * publishes the framebuffer LK left scanning out as the SimpleFbDxe handoff,
+    so the UEFI console and BDS have a display. The base comes from
+    /chosen atag,videolfb-fb_base_l/_h; when the tree has no /chosen the
+    measured mblock-11-framebuffer carveout is used instead;
+  * paints the scanout directly, before GOP exists, with bars that prove the
+    base and pitch and 7-segment hex of the watchdog registers and the
+    published base. This makes a display or reset failure diagnosable from a
+    photograph without a working console.
 
-  The device tree and initrd ranges come from the DT; mAvailableMemory is a
-  static list that still needs the device inventory (see below).
+  The device tree, initrd and framebuffer ranges come from the DT. No additional
+  SystemMemory window is published yet: /proc/iomem shows the reserved carveouts
+  (TEE 0x70000000, WiFi-EMI, the LK framebuffer at 0xFCF2B000 and the high-DDR
+  windows) inside the placeholder range this driver used to hand out, so the DXE
+  heap remains the only pool until that inventory is reconciled.
 
   Copyright (c) 2026, UniXNU contributors. All rights reserved.
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -20,10 +32,12 @@
 #include <Pi/PiDxeCis.h>
 #include <Library/BaseLib.h>
 #include <Library/BaseMemoryLib.h>
+#include <Library/CacheMaintenanceLib.h>
 #include <Library/DebugLib.h>
 #include <Library/DxeServicesTableLib.h>
 #include <Library/FdtLib.h>
 #include <Library/HobLib.h>
+#include <Library/IoLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Protocol/BlockIo.h>
 #include <Protocol/DevicePath.h>
@@ -45,29 +59,67 @@
 #define FDT_MAX_SIZE            (16 * SIZE_1MB)
 
 //
-// The start is derived from this package's own windows: stack 0x40000000 +
-// 0x40000, FD 0x40080000 + 0x300000 and DXE heap 0x40380000 + 0x03C00000.
-// The end is 0x80000 below the measured iomem end of 0x23fffffff; that last
-// window stays out until its owner is known.
+// The panel LK initializes and keeps scanning out: 2560x1600, 32 bpp. The
+// scanout base rides in /chosen atag,videolfb; the geometry does not, and this
+// is the mode the stock DTB describes.
 //
-// REQUIRED: this single range still contains the stock reserved-memory
-// carveouts (TEE, modem/DSP/SMEM, framebuffer, ramoops) that /proc/iomem
-// reports as reserved. DarwinBoot receives this list, so the carveouts must be
-// reconciled with the device tree before the image is used on hardware; until
-// then the image MUST NOT be flashed.
+#define PANEL_WIDTH   2560U
+#define PANEL_HEIGHT  1600U
+#define PANEL_DEPTH   32U
+#define PANEL_PITCH   (PANEL_WIDTH * (PANEL_DEPTH / 8))
+
 //
-// Keep the entries in ascending order.
+// The handoff layout SimpleFbDxe and FrameBufferSerialPortLib parse
+// (SiliciumPkg/Include/Library/FrameBufferMap.h). The header carries static
+// helpers that would trip -Wunused-function here, so the layout is repeated.
 //
+#define FB_HANDOFF_ADDR       0xA4000000ULL
+#define FB_PAGE_MAP_ADDR      0xA4000100ULL
+#define FB_HANDOFF_MAGIC      0x3130424649464555ULL
+#define FB_PAGE_MAP_MAGIC     0x314D504649465545ULL
+#define FB_PAGE_MAP_MAX_RUNS  100U
+
+//
+// The scanout carveout LK reserves on this device (mblock-11-framebuffer,
+// 0xFCF2B000 + 0x30D4000, matching /proc/iomem). Used only when the tree has
+// no /chosen videolfb properties, which happens when the image carries a
+// board DTB that LK does not extend; the carveout itself is fixed by the
+// device DTBO, not by the boot image.
+//
+#define FB_FALLBACK_BASE  0xFCF2B000ULL
+
+//
+// Watchdog and its status register, from the stock watchdog@1c007000 node.
+//
+#define WDT_MODE_REGISTER    0x1C007000U
+#define WDT_STATUS_REGISTER  0x1C00700CU
+#define WDT_MODE_ENABLE      0x00000001U
+
+#pragma pack(1)
 typedef struct {
-  UINT64       Base;
-  UINT64       Length;
-  CONST CHAR8  *Name;
-} AVAILABLE_MEMORY_RANGE;
+  UINT64  Magic;
+  UINT64  Base;
+  UINT32  Width;
+  UINT32  Height;
+  UINT32  Pitch;
+  UINT32  Depth;
+} FB_HANDOFF;
 
-STATIC CONST AVAILABLE_MEMORY_RANGE  mAvailableMemory[] = {
-  { 0x043F80000, 0x1FC080000, "placeholder-8gib" },
-};
+typedef struct {
+  UINT64  Physical;
+  UINT32  Pages;
+  UINT32  Reserved;
+} FB_PAGE_MAP_RUN;
 
+typedef struct {
+  UINT64          Magic;
+  UINT64          LogicalSize;
+  UINT32          PageSize;
+  UINT32          RunCount;
+  FB_PAGE_MAP_RUN Runs[FB_PAGE_MAP_MAX_RUNS];
+} FB_PAGE_MAP;
+#pragma pack()
+//
 STATIC
 UINT64
 ReadCells (
@@ -83,22 +135,25 @@ ReadCells (
 }
 
 /**
-  Add a range to the GCD as reserved memory and map it write-back.
+  Add a range to the GCD as reserved memory with the requested attributes.
 
   Reserved keeps the firmware from allocating over it while every access still
   works; the page tables follow the GCD, so a range that is not added here is
   not necessarily reachable. A range the platform already added is left alone,
   and the attributes are only requested for the part that exists.
 
-  @param[in] Start  First byte of the range.
-  @param[in] End    End of the range, exclusive.
-  @param[in] Name   Range name for the log.
+  @param[in] Start       First byte of the range.
+  @param[in] End         End of the range, exclusive.
+  @param[in] Attributes  EFI_MEMORY_WB for cacheable data, EFI_MEMORY_WT for a
+                         scanout buffer.
+  @param[in] Name        Range name for the log.
 **/
 STATIC
 EFI_STATUS
 MapReserved (
   IN UINT64       Start,
   IN UINT64       End,
+  IN UINT64       Attributes,
   IN CONST CHAR8  *Name
   )
 {
@@ -179,7 +234,7 @@ MapReserved (
     return EFI_UNSUPPORTED;
   }
 
-  Status = gDS->SetMemorySpaceAttributes (Base, Length, EFI_MEMORY_WB);
+  Status = gDS->SetMemorySpaceAttributes (Base, Length, Attributes);
   if (EFI_ERROR (Status)) {
     if (Added) {
       gDS->RemoveMemorySpace (Base, Length);
@@ -189,50 +244,12 @@ MapReserved (
       gBS->FreePages (Base, Pages);
     }
 
-    DEBUG ((DEBUG_ERROR, "TB365FCMEM: %a 0x%lx-0x%lx write-back failed %r\n", Name, Base, Limit, Status));
+    DEBUG ((DEBUG_ERROR, "TB365FCMEM: %a 0x%lx-0x%lx attributes 0x%lx failed %r\n", Name, Base, Limit, Attributes, Status));
     return Status;
   }
 
-  DEBUG ((DEBUG_ERROR, "TB365FCMEM: %a 0x%lx-0x%lx mapped write-back\n", Name, Base, Limit - 1));
+  DEBUG ((DEBUG_ERROR, "TB365FCMEM: %a 0x%lx-0x%lx mapped attributes 0x%lx\n", Name, Base, Limit - 1, Attributes));
   return EFI_SUCCESS;
-}
-
-STATIC
-VOID
-AddAvailableMemory (
-  VOID
-  )
-{
-  EFI_STATUS  Status;
-  UINTN       Index;
-
-  for (Index = 0; Index < ARRAY_SIZE (mAvailableMemory); Index++) {
-    Status = gDS->AddMemorySpace (
-                    EfiGcdMemoryTypeSystemMemory,
-                    mAvailableMemory[Index].Base,
-                    mAvailableMemory[Index].Length,
-                    EFI_MEMORY_UC | EFI_MEMORY_WC | EFI_MEMORY_WT | EFI_MEMORY_WB
-                    );
-    if (!EFI_ERROR (Status)) {
-      Status = gDS->SetMemorySpaceAttributes (
-                      mAvailableMemory[Index].Base,
-                      mAvailableMemory[Index].Length,
-                      EFI_MEMORY_WB
-                      );
-      if (EFI_ERROR (Status)) {
-        gDS->RemoveMemorySpace (mAvailableMemory[Index].Base, mAvailableMemory[Index].Length);
-      }
-    }
-
-    DEBUG ((
-      DEBUG_ERROR,
-      "TB365FCMEM: RAM %a 0x%lx-0x%lx %r\n",
-      mAvailableMemory[Index].Name,
-      mAvailableMemory[Index].Base,
-      mAvailableMemory[Index].Base + mAvailableMemory[Index].Length - 1,
-      Status
-      ));
-  }
 }
 
 #pragma pack(1)
@@ -451,7 +468,7 @@ MapDeviceTree (
   }
 
   HeaderEnd = HeaderBase + FDT_HEADER_WINDOW_SIZE;
-  Status    = MapReserved (HeaderBase, HeaderEnd, "device tree header");
+  Status    = MapReserved (HeaderBase, HeaderEnd, EFI_MEMORY_WB, "device tree header");
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -475,7 +492,7 @@ MapDeviceTree (
 
   ActualEnd = ALIGN_VALUE (FdtEnd, SIZE_4KB);
   if (ActualEnd > HeaderEnd) {
-    Status = MapReserved (HeaderEnd, ActualEnd, "device tree");
+    Status = MapReserved (HeaderEnd, ActualEnd, EFI_MEMORY_WB, "device tree");
     if (EFI_ERROR (Status)) {
       return Status;
     }
@@ -551,7 +568,7 @@ PublishInitrd (
     return EFI_NOT_FOUND;
   }
 
-  Status = MapReserved (Start, Start + Size, "initrd");
+  Status = MapReserved (Start, Start + Size, EFI_MEMORY_WB, "initrd");
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -582,6 +599,304 @@ PublishInitrd (
   }
 
   DEBUG ((DEBUG_ERROR, "TB365FCMEM: initrd block device 0x%lx size 0x%lx\n", Start, Size));
+  return EFI_SUCCESS;
+}
+
+#define FB_COLOR(Red, Green, Blue) \
+  ((UINT32)((((UINT32)(Red)) << 16) | (((UINT32)(Green)) << 8) | ((UINT32)(Blue))))
+
+STATIC
+VOID
+PaintFill (
+  IN UINT32  *Fb,
+  IN UINT32  X,
+  IN UINT32  Y,
+  IN UINT32  Width,
+  IN UINT32  Height,
+  IN UINT32  Color
+  )
+{
+  UINT32  Line;
+  UINT32  Column;
+
+  for (Line = 0; Line < Height; Line++) {
+    for (Column = 0; Column < Width; Column++) {
+      Fb[(Y + Line) * PANEL_WIDTH + X + Column] = Color;
+    }
+  }
+}
+
+//
+// Segment masks for 0-F: bit0 top, bit1 top-right, bit2 bottom-right,
+// bit3 bottom, bit4 bottom-left, bit5 top-left, bit6 middle.
+//
+STATIC CONST UINT8  mHexSegments[16] = {
+  0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07,
+  0x7F, 0x6F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71
+};
+
+STATIC
+VOID
+PaintDigit (
+  IN UINT32  *Fb,
+  IN UINT32  X,
+  IN UINT32  Y,
+  IN UINT32  Unit,
+  IN UINT8   Segments,
+  IN UINT32  Color
+  )
+{
+  if ((Segments & 0x01) != 0) {
+    PaintFill (Fb, X + Unit, Y, 3 * Unit, Unit, Color);
+  }
+
+  if ((Segments & 0x02) != 0) {
+    PaintFill (Fb, X + 4 * Unit, Y + Unit, Unit, 2 * Unit, Color);
+  }
+
+  if ((Segments & 0x04) != 0) {
+    PaintFill (Fb, X + 4 * Unit, Y + 4 * Unit, Unit, 2 * Unit, Color);
+  }
+
+  if ((Segments & 0x08) != 0) {
+    PaintFill (Fb, X + Unit, Y + 6 * Unit, 3 * Unit, Unit, Color);
+  }
+
+  if ((Segments & 0x10) != 0) {
+    PaintFill (Fb, X, Y + 4 * Unit, Unit, 2 * Unit, Color);
+  }
+
+  if ((Segments & 0x20) != 0) {
+    PaintFill (Fb, X, Y + Unit, Unit, 2 * Unit, Color);
+  }
+
+  if ((Segments & 0x40) != 0) {
+    PaintFill (Fb, X + Unit, Y + 3 * Unit, 3 * Unit, Unit, Color);
+  }
+}
+
+STATIC
+VOID
+PaintHexRow (
+  IN UINT32  *Fb,
+  IN UINT32  X,
+  IN UINT32  Y,
+  IN UINT32  Unit,
+  IN UINT32  Value,
+  IN UINT32  Color
+  )
+{
+  UINT32  Index;
+
+  for (Index = 0; Index < 8; Index++) {
+    PaintDigit (
+      Fb,
+      X + Index * 6 * Unit,
+      Y,
+      Unit,
+      mHexSegments[(Value >> (28 - 4 * Index)) & 0xF],
+      Color
+      );
+  }
+}
+
+/**
+  Paint the scanout directly, without GOP or the DXE console.
+
+  Eight vertical bars prove the base address and pitch are the ones the panel
+  scans. A black panel then shows four rows of 7-segment hex: WDT_MODE at
+  0x1C007000, WDT_STATUS at 0x1C00700C, the low and high halves of the
+  published frame buffer base. A green square after the WDT_MODE row means the
+  watchdog reads back disabled; red means the enable bit survived the SEC
+  write. The bars are held for five seconds, long enough to photograph, then
+  BDS paints its own graphics over them.
+
+  @param[in] Base       Framebuffer physical base, already mapped.
+  @param[in] WdtMode    WDT_MODE readback.
+  @param[in] WdtStatus  WDT_STATUS readback.
+**/
+STATIC
+VOID
+PaintDiagnostics (
+  IN UINT64  Base,
+  IN UINT32  WdtMode,
+  IN UINT32  WdtStatus
+  )
+{
+  UINT32  *Fb;
+  UINT32  Bars[8];
+  UINT32  Index;
+  UINT32  Unit;
+  UINT32  Y;
+  UINT32  White;
+
+  Fb    = (UINT32 *)(UINTN)Base;
+  White = FB_COLOR (0xFF, 0xFF, 0xFF);
+
+  Bars[0] = FB_COLOR (0xE0, 0x00, 0x00);
+  Bars[1] = FB_COLOR (0x00, 0xE0, 0x00);
+  Bars[2] = FB_COLOR (0x00, 0x00, 0xE0);
+  Bars[3] = FB_COLOR (0xE0, 0xE0, 0x00);
+  Bars[4] = FB_COLOR (0x00, 0xE0, 0xE0);
+  Bars[5] = FB_COLOR (0xE0, 0x00, 0xE0);
+  Bars[6] = White;
+  Bars[7] = FB_COLOR (0x00, 0x00, 0x00);
+
+  for (Index = 0; Index < ARRAY_SIZE (Bars); Index++) {
+    PaintFill (Fb, Index * (PANEL_WIDTH / 8), 0, PANEL_WIDTH / 8, PANEL_HEIGHT, Bars[Index]);
+  }
+
+  Unit = 8;
+  PaintFill (Fb, 16, 16, 560, 304, FB_COLOR (0x00, 0x00, 0x00));
+
+  Y = 32;
+  PaintFill (Fb, 32, Y + 8, 4 * Unit, 4 * Unit, FB_COLOR (0xE0, 0x00, 0x00));
+  PaintHexRow (Fb, 96, Y, Unit, WdtMode, White);
+  PaintFill (
+    Fb,
+    528,
+    Y + 8,
+    4 * Unit,
+    4 * Unit,
+    ((WdtMode & WDT_MODE_ENABLE) != 0) ? FB_COLOR (0xE0, 0x00, 0x00) : FB_COLOR (0x00, 0xC0, 0x00)
+    );
+
+  Y = 100;
+  PaintFill (Fb, 32, Y + 8, 4 * Unit, 4 * Unit, FB_COLOR (0xE0, 0xE0, 0x00));
+  PaintHexRow (Fb, 96, Y, Unit, WdtStatus, White);
+
+  Y = 168;
+  PaintFill (Fb, 32, Y + 8, 4 * Unit, 4 * Unit, FB_COLOR (0x00, 0xE0, 0xE0));
+  PaintHexRow (Fb, 96, Y, Unit, (UINT32)Base, White);
+
+  Y = 236;
+  PaintFill (Fb, 32, Y + 8, 4 * Unit, 4 * Unit, FB_COLOR (0xE0, 0x00, 0xE0));
+  PaintHexRow (Fb, 96, Y, Unit, (UINT32)(Base >> 32), White);
+
+  WriteBackDataCacheRange ((VOID *)Fb, (UINTN)PANEL_PITCH * PANEL_HEIGHT);
+  gBS->Stall (5 * 1000 * 1000);
+}
+
+/**
+  Publish the framebuffer LK left scanning out as the SimpleFbDxe handoff.
+
+  LK records the scanout base in /chosen atag,videolfb-fb_base_l and
+  atag,videolfb-fb_base_h; the geometry is the panel mode. SimpleFbDxe and the
+  debug console read the handoff page directly, so MemoryMapLib reserves it as
+  well. A board DTB that LK does not extend carries no videolfb properties;
+  the measured carveout is used then, and the diagnostic on screen reports
+  which base was published.
+
+  @param[in] Fdt  Flattened device tree, already mapped.
+**/
+STATIC
+EFI_STATUS
+PublishFramebuffer (
+  IN CONST VOID  *Fdt
+  )
+{
+  EFI_STATUS   Status;
+  INT32        Chosen;
+  CONST VOID   *BaseLow;
+  CONST VOID   *BaseHigh;
+  CONST VOID   *Vram;
+  INT32        BaseLowLength;
+  INT32        BaseHighLength;
+  INT32        VramLength;
+  UINT64       Base;
+  UINT64       VramSize;
+  UINT64       LogicalSize;
+  UINT32       WdtMode;
+  UINT32       WdtStatus;
+  BOOLEAN      FromDt;
+  FB_HANDOFF   *Handoff;
+  FB_PAGE_MAP  *Map;
+
+  Base     = 0;
+  VramSize = 0;
+  FromDt   = FALSE;
+
+  Chosen = FdtPathOffset (Fdt, "/chosen");
+  if (Chosen >= 0) {
+    BaseLow = FdtGetProp (Fdt, Chosen, "atag,videolfb-fb_base_l", &BaseLowLength);
+    if ((BaseLow != NULL) && (BaseLowLength == 4)) {
+      Base = Fdt32ToCpu (ReadUnaligned32 (BaseLow));
+
+      BaseHigh = FdtGetProp (Fdt, Chosen, "atag,videolfb-fb_base_h", &BaseHighLength);
+      if ((BaseHigh != NULL) && (BaseHighLength == 4)) {
+        Base |= LShiftU64 ((UINT64)Fdt32ToCpu (ReadUnaligned32 (BaseHigh)), 32);
+      }
+
+      FromDt = TRUE;
+    }
+
+    Vram = FdtGetProp (Fdt, Chosen, "atag,videolfb-vramSize", &VramLength);
+    if ((Vram != NULL) && (VramLength == 4)) {
+      VramSize = Fdt32ToCpu (ReadUnaligned32 (Vram));
+    }
+  }
+
+  if (!FromDt) {
+    DEBUG ((DEBUG_ERROR, "TB365FCMEM: no atag,videolfb in /chosen, using measured carveout\n"));
+    Base = FB_FALLBACK_BASE;
+  }
+
+  if ((Base == 0) || ((Base & (SIZE_4KB - 1)) != 0) ||
+      (Base < 0x40000000ULL) || (Base >= 0x240000000ULL)) {
+    DEBUG ((DEBUG_ERROR, "TB365FCMEM: invalid framebuffer base 0x%lx\n", Base));
+    return EFI_INVALID_PARAMETER;
+  }
+
+  LogicalSize = (UINT64)PANEL_PITCH * PANEL_HEIGHT;
+  if ((Base + LogicalSize) > 0x240000000ULL) {
+    DEBUG ((DEBUG_ERROR, "TB365FCMEM: framebuffer 0x%lx + 0x%lx leaves DRAM\n", Base, LogicalSize));
+    return EFI_INVALID_PARAMETER;
+  }
+
+  if ((VramSize != 0) && (LogicalSize > VramSize)) {
+    DEBUG ((DEBUG_ERROR, "TB365FCMEM: framebuffer 0x%lx size 0x%lx exceeds vramSize 0x%lx\n", Base, LogicalSize, VramSize));
+    return EFI_INVALID_PARAMETER;
+  }
+
+  Status = MapReserved (Base, Base + LogicalSize, EFI_MEMORY_WT, "framebuffer");
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  Handoff = (FB_HANDOFF *)(UINTN)FB_HANDOFF_ADDR;
+  ZeroMem (Handoff, sizeof (*Handoff));
+  Handoff->Magic  = FB_HANDOFF_MAGIC;
+  Handoff->Base   = Base;
+  Handoff->Width  = PANEL_WIDTH;
+  Handoff->Height = PANEL_HEIGHT;
+  Handoff->Pitch  = PANEL_PITCH;
+  Handoff->Depth  = PANEL_DEPTH;
+
+  Map = (FB_PAGE_MAP *)(UINTN)FB_PAGE_MAP_ADDR;
+  ZeroMem (Map, sizeof (*Map));
+  Map->Magic            = FB_PAGE_MAP_MAGIC;
+  Map->LogicalSize      = LogicalSize;
+  Map->PageSize         = (UINT32)SIZE_4KB;
+  Map->RunCount         = 1;
+  Map->Runs[0].Physical = Base;
+  Map->Runs[0].Pages    = (UINT32)EFI_SIZE_TO_PAGES (LogicalSize);
+
+  WdtMode   = MmioRead32 (WDT_MODE_REGISTER);
+  WdtStatus = MmioRead32 (WDT_STATUS_REGISTER);
+
+  DEBUG ((
+    DEBUG_ERROR,
+    "TB365FCMEM: framebuffer 0x%lx %ux%u pitch %u from %a, wdt mode 0x%x status 0x%x\n",
+    Base,
+    PANEL_WIDTH,
+    PANEL_HEIGHT,
+    PANEL_PITCH,
+    FromDt ? "DT" : "carveout",
+    WdtMode,
+    WdtStatus
+    ));
+
+  PaintDiagnostics (Base, WdtMode, WdtStatus);
   return EFI_SUCCESS;
 }
 
@@ -621,7 +936,8 @@ Tb365fcBootMemoryDxeEntry (
   Status = PublishInitrd (Fdt);
   DEBUG ((DEBUG_ERROR, "TB365FCMEM: initrd publish %r\n", Status));
 
-  AddAvailableMemory ();
+  Status = PublishFramebuffer (Fdt);
+  DEBUG ((DEBUG_ERROR, "TB365FCMEM: framebuffer publish %r\n", Status));
 
 #ifndef MDEPKG_NDEBUG
   ProbeBlockIo (NULL, NULL);

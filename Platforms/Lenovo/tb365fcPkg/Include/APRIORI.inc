@@ -10,18 +10,12 @@ APRIORI DXE {
   INF EmbeddedPkg/MetronomeDxe/MetronomeDxe.inf
   INF ArmPkg/Drivers/TimerDxe/TimerDxe.inf
 
-  INF MediaTekPkg/Drivers/GpioDxe/GpioDxe.inf
-  INF MediaTekPkg/Drivers/ClockDxe/ClockDxe.inf
-  INF MediaTekPkg/Drivers/PmicWrapperDxe/PmicWrapperDxe.inf
-  INF MediaTekPkg/Drivers/MT6358PmicDxe/MT6358PmicDxe.inf
+  # The ramdisk block device must exist before Partition/Fat start.
+  INF tb365fcPkg/Drivers/BootRamdiskDxe/BootRamdiskDxe.inf
 
   INF MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf
   INF MdeModulePkg/Universal/Disk/PartitionDxe/PartitionDxe.inf
 
-  INF MediaTekPkg/Drivers/MsdcDxe/MsdcDxe.inf
-
-  INF MdeModulePkg/Bus/Sd/EmmcDxe/EmmcDxe.inf
-  INF MdeModulePkg/Bus/Sd/SdDxe/SdDxe.inf
   INF FatPkg/EnhancedFatDxe/Fat.inf
   INF MdeModulePkg/Universal/Disk/UnicodeCollation/EnglishDxe/EnglishDxe.inf
   INF MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
@@ -38,11 +32,16 @@ APRIORI DXE {
 !if $(USE_CUSTOM_DISPLAY_DRIVER) == 0
   INF SiliciumPkg/Drivers/SimpleFbDxe/SimpleFbDxe.inf
 !endif
-  INF SiliciumPkg/Drivers/KeypadDeviceDxe/KeypadDeviceDxe.inf
-  INF SiliciumPkg/Drivers/KeypadDxe/KeypadDxe.inf
 
+  INF MdeModulePkg/Universal/SerialDxe/SerialDxe.inf
   INF EmbeddedPkg/SimpleTextInOutSerial/SimpleTextInOutSerial.inf
   INF MdeModulePkg/Universal/Console/ConPlatformDxe/ConPlatformDxe.inf
   INF MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
   INF MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf
+
+  # KeypadDeviceDxe reads the PMIC keys through this protocol.
+  INF MediaTekPkg/Drivers/PmicWrapperDxe/PmicWrapperDxe.inf
+
+  INF SiliciumPkg/Drivers/KeypadDeviceDxe/KeypadDeviceDxe.inf
+  INF SiliciumPkg/Drivers/KeypadDxe/KeypadDxe.inf
 }

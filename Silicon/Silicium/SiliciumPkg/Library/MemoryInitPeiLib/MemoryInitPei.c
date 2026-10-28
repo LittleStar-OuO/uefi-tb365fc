@@ -10,6 +10,17 @@
 #include <Library/MemoryMapLib.h>
 #include <Library/DebugLib.h>
 #include <Library/HobLib.h>
+#include <Library/SerialPortLib.h>
+#include <Library/BaseLib.h>
+
+STATIC
+VOID
+MmuTrace (
+  IN CONST CHAR8  *Text
+  )
+{
+  SerialPortWrite ((UINT8 *)Text, AsciiStrLen (Text));
+}
 
 VOID
 BuildMemoryTypeInformationHob ();
@@ -115,14 +126,15 @@ MemoryPeim (
 
   // Show Entry Message
   DEBUG ((EFI_D_WARN, "MMU In\r"));
+  MmuTrace ("MMU 1: enter\n");
 
   // Get Memory Map
   GetMemoryMap (&MemoryDescriptor, &MemoryDescriptorCount);
-  DEBUG ((EFI_D_WARN, "MMU map %u\n", MemoryDescriptorCount));
+  MmuTrace ("MMU 2: map\n");
 
   // Validate Memory Map
   ValidateMemoryMap (MemoryDescriptor, MemoryDescriptorCount);
-  DEBUG ((EFI_D_WARN, "MMU sorted\n"));
+  MmuTrace ("MMU 3: valid\n");
 
   // Go thru each Memory Region
   for (UINT8 i = 0; i < MemoryDescriptorCount; i++) {
@@ -143,20 +155,24 @@ MemoryPeim (
     // Increase Memory Table Index
     Index++;
   }
-  DEBUG ((EFI_D_WARN, "MMU table %u\n", Index));
 
   // Configure MMU
+  MmuTrace ("MMU 4: configure\n");
   Status = ArmConfigureMmu (MemoryTable, &TranslationTableBase, &TranslationTableSize);
-  DEBUG ((EFI_D_WARN, "MMU config returned %r\n", Status));
   if (EFI_ERROR (Status)) {
     DEBUG ((EFI_D_ERROR, "Failed to Configure MMU! Status = %r\n", Status));
+    MmuTrace ("MMU 5: configure FAIL\n");
     return Status;
   }
+
+  MmuTrace ("MMU 5: configure ok\n");
 
   // Build Memory Type Info HOB
   if (FeaturePcdGet (PcdPrePiProduceMemoryTypeInformationHob)) {
     BuildMemoryTypeInformationHob ();
   }
+
+  MmuTrace ("MMU 6: done\n");
 
   return EFI_SUCCESS;
 }

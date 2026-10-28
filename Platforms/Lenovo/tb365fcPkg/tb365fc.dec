@@ -1,0 +1,14 @@
+##
+#  Lenovo TB365FC (MediaTek MT6835) platform package.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  DEC_SPECIFICATION                   = 0x00010005
+  PACKAGE_NAME                        = tb365fcPkg
+  PACKAGE_GUID                        = 5C1E7A92-3D4B-4F86-B0A7-9E2C5D1F83B4
+  PACKAGE_VERSION                     = 0.1
+
+[Includes]
+  Include

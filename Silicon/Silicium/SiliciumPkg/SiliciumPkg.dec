@@ -12,6 +12,7 @@
 
   # HOB holding the first argument (x0) the previous stage entered SEC with.
   # A Linux-style boot loader passes the physical address of a flattened DT.
+  # (Same GUID as UniXNU/uefi-sheng.)
   gSiliciumEntryArgHobGuid            = { 0xDAEE82E6, 0x8090, 0x4E72, { 0xBF, 0xB9, 0x78, 0xC1, 0x3C, 0xD4, 0xE3, 0x59 } }
 
 [Protocols]

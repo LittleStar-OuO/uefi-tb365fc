@@ -17,10 +17,12 @@
 [LibraryClasses]
   BaseLib
   BaseMemoryLib
+  CacheMaintenanceLib
   DebugLib
   DxeServicesTableLib
   FdtLib
   HobLib
+  IoLib
   UefiBootServicesTableLib
   UefiDriverEntryPoint
 

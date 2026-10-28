@@ -30,6 +30,8 @@
   MemoryMapLib
   DebugLib
   HobLib
+  SerialPortLib
+  BaseLib
 
 [FeaturePcd]
   gEmbeddedTokenSpaceGuid.PcdPrePiProduceMemoryTypeInformationHob

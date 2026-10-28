@@ -10,4 +10,5 @@ MTK_PMIC_WRAPPER_PLATFORM_INFO gPlatformInfo = {
     [PmicWrapperSwinf2RData31] = 0x894,
   },
   .ArbCapabilities = TRUE,
+  .SlaveId = 4,
 };

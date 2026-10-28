@@ -1,0 +1,29 @@
+## @file
+#  MT6835 UART0 serial port library.
+#
+#  Ported from mouseos/edk2-mtk (Silicon/MediaTek/MT6835Pkg/Library/
+#  UartSerialPortLib, commit 1982d888c765).
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = UartSerialPortLib
+  FILE_GUID                      = 79D78FA8-03DC-4CC7-94A2-CB9B873DA590
+  MODULE_TYPE                    = BASE
+  VERSION_STRING                 = 1.0
+  LIBRARY_CLASS                  = SerialPortLib
+
+[Sources]
+  UartSerialPortLib.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  IoLib
+  PcdLib
+
+[FixedPcd]
+  gEfiMdePkgTokenSpaceGuid.PcdUartDefaultBaudRate

@@ -7,21 +7,37 @@
 
 #include <Library/PcdLib.h>
 #include <Library/DebugLib.h>
+#include <Library/BaseMemoryLib.h>
 #include <Library/AcpiTableUpdateLib.h>
 #include <Library/DeviceBootManagerLib.h>
 #include <Library/PlatformBootManagerLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
 #include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiBootManagerLib.h>
 #include <Library/SecureBootHandlerLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/MsBootOptionsLib.h>
 #include <Library/BootGraphicsLib.h>
 #include <Library/BootGraphics.h>
 #include <Library/PrintLib.h>
+#include <Library/StageBeacon.h>
+#include <Library/IoLib.h>
+#include <Library/MemoryMapHelperLib.h>
+
+#include <Protocol/SimpleTextOut.h>
+#include <Protocol/HiiFont.h>
+#include <Protocol/GraphicsOutput.h>
 
 #include <Configuration/BootDevices.h>
 
 #include "BootManager.h"
+
+//
+// MediaTek keypad controller, same layout as the Linux mtk-kpd driver.
+// KP_MEM1 holds one bit per matrix position, 1 = released, 0 = pressed.
+//
+#define KPD_KP_MEM1  0x04
+#define KPD_BIT_VOLUME_UP  0x0001
 
 //
 // Global Variables
@@ -34,10 +50,26 @@ STATIC UINTN YPos = 0;
 //
 STATIC CONST CHAR8 *ComboMessage = "[Volume Up] Boot Manager";
 
+STATIC
+VOID
+HoldBootLogo (
+  VOID
+  )
+{
+  //
+  // The boot logo is the only thing on screen: hold it long enough to be
+  // read before the boot option draws over it.
+  //
+  gBS->Stall (2 * 1000 * 1000);
+}
+
+
 VOID
 EFIAPI
 PlatformBootManagerBeforeConsole ()
 {
+  StageBeacon (9);
+
   // Signal End Of DXE
   EfiEventGroupSignal (&gEfiEndOfDxeEventGroupGuid);
 
@@ -54,6 +86,8 @@ PlatformBootManagerBeforeConsole ()
 
   // Execute Secondary Before Console
   DeviceBootManagerBeforeConsole (NULL, NULL);
+
+  StageBeacon (10);
 }
 
 VOID
@@ -101,6 +135,8 @@ PlatformBootManagerAfterConsole ()
   EFI_STATUS                    Status      = EFI_SUCCESS;
   EFI_GRAPHICS_OUTPUT_PROTOCOL *GopProtocol = NULL;
 
+  StageBeacon (11);
+
   // Post Setup GOP
   PostGopSetup (&GopProtocol);
 
@@ -110,8 +146,15 @@ PlatformBootManagerAfterConsole ()
     DEBUG ((EFI_D_ERROR, "%a: Failed to Display Boot Logo! Status = %r\n", __FUNCTION__, Status));
   }
 
+  StageBeacon (12);
+
+  // Hold the Project Silicium logo on the panel
+  HoldBootLogo ();
+  StageBeacon (13);
+
   // Register Key Callback
   Status = RegisterKeyCallback ((EFI_DEVICE_PATH_PROTOCOL *)&KeypadDevicePath);
+  StageBeacon (14);
   if (!EFI_ERROR (Status) && GopProtocol != NULL) {
     // Set Screen Resolution
     UINT32 ScreenWidth  = GopProtocol->Mode->Info->HorizontalResolution;
@@ -124,6 +167,7 @@ PlatformBootManagerAfterConsole ()
 
   // Execute Secondary After Console
   DeviceBootManagerAfterConsole ();
+  StageBeacon (15);
 }
 
 VOID
@@ -138,7 +182,14 @@ VOID
 EFIAPI
 PlatformBootManagerProcessBootCompletion (OUT EFI_BOOT_MANAGER_LOAD_OPTION *BootOption)
 {
-  return;
+  if (BootOption != NULL) {
+    DEBUG ((
+      EFI_D_ERROR,
+      "BDS: option %04x status %r\n",
+      (UINT32)BootOption->OptionNumber,
+      BootOption->Status
+      ));
+  }
 }
 
 VOID
@@ -149,11 +200,19 @@ PlatformBootManagerPriorityBoot (IN OUT UINT16 **BootNext)
   EFI_BOOT_MANAGER_LOAD_OPTION LoadOption;
   BOOLEAN                      BootManagerFlag;
 
+  StageBeacon (16);
+
+  // Pick up a key pressed after the BDS wait
+  PollBootManagerKey ();
+  StageBeacon (17);
+
   // Unregister Key Callback
   UnregisterKeyCallback ();
+  StageBeacon (18);
 
   // Get Boot Manager Flag
   BootManagerFlag = EnterBootManager ();
+  StageBeacon (19);
   if (BootManagerFlag == FALSE) {
     return;
   }
@@ -197,11 +256,48 @@ PlatformBootManagerWaitCallback (IN UINT16 TimeoutRemain)
   }
 }
 
+STATIC
+VOID
+PollKeypadForShutdown (
+  VOID
+  )
+{
+  EFI_MEMORY_REGION_DESCRIPTOR  KeypadRegion;
+  UINT32                        HeldMs;
+
+  //
+  // Nothing bootable is left. The keypad driver's timer no longer runs, so
+  // poll the controller here: the same long Volume Up hold that powers off
+  // in the menu has to work on this screen as well.
+  //
+  if (EFI_ERROR (LocateMemoryRegionByName ("Keypad", &KeypadRegion))) {
+    CpuDeadLoop ();
+    return;
+  }
+
+  HeldMs = 0;
+  for (;;) {
+    if ((MmioRead16 (KeypadRegion.Address + KPD_KP_MEM1) & KPD_BIT_VOLUME_UP) == 0) {
+      HeldMs += 20;
+      if (HeldMs >= 3000) {
+        gRT->ResetSystem (EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+        HeldMs = 0;
+      }
+    } else {
+      HeldMs = 0;
+    }
+
+    gBS->Stall (20000);
+  }
+}
+
 VOID
 EFIAPI
 PlatformBootManagerUnableToBoot ()
 {
   EFI_STATUS Status;
+
+  StageBeacon (20);
 
   // Execute Secondary Unable To Boot
   DeviceBootManagerUnableToBoot ();
@@ -213,14 +309,8 @@ PlatformBootManagerUnableToBoot ()
     Print (L"No Operating System Found! Please make sure that an OS is Installed.\n");
   }
 
-  // Wait 10s
-  gBS->Stall (10000000);
-
-  // Shutdown
-  gRT->ResetSystem (EfiResetShutdown, EFI_SUCCESS, 0, NULL);
-
-  // Do Cpu Dead Loop
-  CpuDeadLoop ();
+  // Keep the fallback screen; a long Volume Up hold still powers off
+  PollKeypadForShutdown ();
 }
 
 VOID

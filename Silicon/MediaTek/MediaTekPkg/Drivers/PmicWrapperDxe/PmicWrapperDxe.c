@@ -13,6 +13,16 @@ typedef enum {
   WacsFsmWfVldClr = 6,
 } WACS_FSM_STATE;
 
+#define WACS_TIMEOUT_US        1000
+
+//
+// SPMI command types for single-byte register accesses. LK sends
+// opcode 0x38 for a register read (EXT_REG_LONG, type 0xC) and 0x30
+// for a write (type 0xE); the type occupies bits 31:29.
+//
+#define WACS_SPMI_READ         0xC0000000
+#define WACS_SPMI_WRITE        0xE0000000
+
 STATIC EFI_MEMORY_REGION_DESCRIPTOR mPmicWrapperRegion;
 
 STATIC
@@ -52,19 +62,26 @@ WacsGetFsm ()
 }
 
 STATIC
-VOID
+BOOLEAN
 WacsWaitFor (
   IN WACS_FSM_STATE Fsm)
 {
+  UINTN Elapsed;
+
   // Wait until FSM reaches requested state
-  while (WacsGetFsm () != Fsm)
-  {
-    MicroSecondDelay (100);
+  for (Elapsed = 0; Elapsed <= WACS_TIMEOUT_US; Elapsed += 10) {
+    if (WacsGetFsm () == Fsm) {
+      return TRUE;
+    }
+
+    MicroSecondDelay (10);
   }
+
+  return FALSE;
 }
 
 STATIC
-VOID
+BOOLEAN
 WacsCommand (
   IN UINT32  Address,
   IN UINT32  Data,
@@ -72,22 +89,42 @@ WacsCommand (
 {
   UINT32 WacsCommand;
 
+  //
+  // A transaction left waiting for its data valid clear, for instance by
+  // the bootloader, would stall every later access. Drop it once.
+  //
+  if (WacsGetFsm () == WacsFsmWfVldClr) {
+    PmicWrapperWrite (PmicWrapperWacs2VldClr, 1);
+  }
+
   // Wait until FSM reaches idle state
-  WacsWaitFor (WacsFsmIdle);
+  if (!WacsWaitFor (WacsFsmIdle)) {
+    return FALSE;
+  }
 
   // Encode Address, data and write mode
   if (gPlatformInfo.ArbCapabilities) {
-    WacsCommand = Address;
+    //
+    // SPMI: bits 31:29 select the transaction, 27:24 carry the slave
+    // (USID), 21:16 the byte count minus one and 15:0 the register.
+    //
     if (IsWrite) {
       PmicWrapperWrite (PmicWrapperSwinf2WData31, Data);
-      WacsCommand |= (1 << 29);
+      WacsCommand = WACS_SPMI_WRITE;
+    } else {
+      WacsCommand = WACS_SPMI_READ;
     }
+
+    WacsCommand |= (UINT32)gPlatformInfo.SlaveId << 24;
+    WacsCommand |= Address & 0xFFFF;
   } else {
     WacsCommand = (IsWrite << 31) | ((Address >> 1) << 16) | Data;
   }
 
   // Write Command
   PmicWrapperWrite (PmicWrapperWacs2Cmd, WacsCommand);
+
+  return TRUE;
 }
 
 STATIC
@@ -98,9 +135,17 @@ PmicWrapperImplRead (
 {
   UINT32 Result;
 
+  *Value = 0;
+
   // Send read transaction and wait until result become valid
-  WacsCommand (Address, 0, FALSE);
-  WacsWaitFor (WacsFsmWfVldClr);
+  if (!WacsCommand (Address, 0, FALSE)) {
+    return;
+  }
+
+  if (!WacsWaitFor (WacsFsmWfVldClr)) {
+    PmicWrapperWrite (PmicWrapperWacs2VldClr, 1);
+    return;
+  }
 
   // Read data
   Result = PmicWrapperRead (gPlatformInfo.ArbCapabilities ? PmicWrapperSwinf2RData31 : PmicWrapperWacs2RData);
@@ -141,11 +186,11 @@ InitPmicWrapper (
   }
 
   // Read init state of PMIC Wrapper
-  InitState = PmicWrapperRead (PmicWrapperInitDone2);
-  if (InitState != 1) {
-    DEBUG ((EFI_D_ERROR, "PMIC Wrapper Not Initialized!\n", Status));
-    Status = EFI_NOT_READY;
-    ASSERT_EFI_ERROR (Status);
+  if (!gPlatformInfo.ArbCapabilities) {
+    InitState = PmicWrapperRead (PmicWrapperInitDone2);
+    if (InitState != 1) {
+      DEBUG ((EFI_D_ERROR, "PMIC Wrapper Not Initialized!\n"));
+    }
   }
 
   // Register PMIC Wrapper Protocol

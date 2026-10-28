@@ -13,9 +13,45 @@
 .set CTRL_SPAN_BIT, BIT23
 
 ASM_FUNC (_ModuleEntryPoint)
+  // Diagnostic beacon 0: green square at (24,2440) plus bit 0 of the stage
+  // mask at 0xFFFFD000, written before anything else runs. Uses no stack and
+  // preserves x0-x3.
+  movz  x9, #0xFF00, lsl #48
+  movk  x9, #0xFF00, lsl #32
+  movk  x9, #0xFF00, lsl #16
+  movk  x9, #0xFF00
+  movz  x10, #0xFFFF, lsl #16
+  movk  x10, #0xD000
+  movz  x11, #1
+  str   x11, [x10]
+  movz  x10, #0xFCF2, lsl #16
+  movk  x10, #0xB000
+  movz  x11, #2440
+  movz  x12, #6400
+  mul   x11, x11, x12
+  add   x10, x10, x11
+  add   x10, x10, #96
+  movz  x11, #72
+8:
+  stp   x9, x9, [x10, #0]
+  stp   x9, x9, [x10, #16]
+  stp   x9, x9, [x10, #32]
+  stp   x9, x9, [x10, #48]
+  stp   x9, x9, [x10, #64]
+  stp   x9, x9, [x10, #80]
+  stp   x9, x9, [x10, #96]
+  stp   x9, x9, [x10, #112]
+  stp   x9, x9, [x10, #128]
+  stp   x9, x9, [x10, #144]
+  stp   x9, x9, [x10, #160]
+  stp   x9, x9, [x10, #176]
+  add   x10, x10, x12
+  subs  x11, x11, #1
+  b.ne  8b
+
   // The previous stage may enter with SPSel=0. Exceptions are then taken on
-  // the stale SP_EL1 instead of the stack set up below, so select SP_ELx
-  // first; the stack pointer written in MainEntryPoint is then SP_EL1.
+  // the stale SP_ELx of that stage instead of the stack set up below, so
+  // select SP_ELx first. (From UniXNU/uefi-sheng.)
   msr   SPSel, #1
   isb
 

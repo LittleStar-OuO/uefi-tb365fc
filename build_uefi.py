@@ -385,8 +385,8 @@ def create_android_boot_img (ctx: BuildContext, image_kernel_config: dict, image
         # Get Argument Value
         value = image_config.get (key)
 
-        # Append Argument Value
-        if value:
+        # Append Argument Value (zero is a valid address offset)
+        if value is not None:
             cmd.append (option)
             cmd.append (str (value))
 

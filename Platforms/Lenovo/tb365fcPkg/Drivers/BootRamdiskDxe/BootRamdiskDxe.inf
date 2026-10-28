@@ -1,0 +1,47 @@
+##
+#  Boot image ramdisk of Lenovo TB365FC as a read-only Block I/O device.
+#
+#  Derived from UniXNU/uefi-sheng Platforms/Xiaomi/shengPkg/Drivers/
+#  ShengBootMemoryDxe (initrd part).
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = BootRamdiskDxe
+  FILE_GUID                      = 7E4F2A91-5C3D-4B68-9A07-2F1D8C5E6B93
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = BootRamdiskDxeEntry
+
+[Sources]
+  BootRamdiskDxe.c
+
+[Packages]
+  ArmPkg/ArmPkg.dec
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  SiliciumPkg/SiliciumPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  FdtLib
+  HobLib
+  MemoryMapHelperLib
+  PrintLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiRuntimeServicesTableLib
+
+[Guids]
+  gSiliciumEntryArgHobGuid                      ## CONSUMES
+
+[Protocols]
+  gEfiBlockIoProtocolGuid                       ## PRODUCES
+  gEfiDevicePathProtocolGuid                    ## PRODUCES
+
+[Depex]
+  TRUE

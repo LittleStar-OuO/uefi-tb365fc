@@ -1,26 +1,29 @@
 #
-# Lenovo TB365FC (MT6835) - UEFI FD and boot image geometry.
+# Lenovo TB365FC (MediaTek MT6835), 8 GiB, UFS 2.2.
 #
-# Measured from the stock ZUXOS 1.1.10.122 package (tools/unpack_boot_image.py):
-#   - boot.img uses header v4 (page size 4096, no load addresses)
-#   - vendor_boot.img uses header v4: kernel_addr 0x40000000,
-#     ramdisk_addr 0x66F00000, tags_addr 0x47C80000, dtb_addr 0x47C80000
-#   - cmdline "bootopt=64S3,32N2,64N2"
-# The v4 header carries no addresses, so these come from the vendor_boot
-# header; the self-built image below is v2 so that LK loads the FD (gzipped,
-# no BootShim in this image) at kernel_addr. That address is still the Plan A
-# convention proven on merlinx and camellia (FD base == kernel_addr ==
-# 0x40080000), not an observed LK constant: the stock GKI kernel is loaded at
-# 0x40000000, where our FD does not fit because LK keeps its boot structures
-# at the DRAM entry.
+# Boot image layout of Android 15 / ZUXOS 1.1.10.122, read back from the
+# stock vendor_boot.img:
 #
-# The UEFI CPU stack (0x40000000 / 0x40000) lives below the FD; the
-# MemoryMapLib in Platforms/Lenovo/tb365fcPkg and mAvailableMemory in
-# Tb365fcBootMemoryDxe must agree with [uefi_fd].base.
+#   vendor_boot v4 header: kernel_addr 0x40000000, ramdisk_addr 0x66F00000,
+#   tags_addr 0x47C80000, cmdline "bootopt=64S3,32N2,64N2".
+#
+# LK decompresses the boot image kernel to kernel_addr and jumps there, so
+# the UEFI FD (whose first bytes branch to the SEC entry) is packaged as a
+# compressed v4 kernel with no ramdisk. init_boot and vendor_boot stay
+# stock: LK loads their ramdisks to 0x66F00000 and the DTB to the tags
+# address. No Boot Shim is needed because kernel_addr is the FD base.
+#
+# The FD window lies at the start of the LK kernel mblock
+# (0x40000000-0x47C80000) and must match tb365fc.dsc (stack at 0x40400000)
+# and MemoryMapLib.
+#
+
+#
+# UEFI FD Configs
 #
 [uefi_fd]
-base = 0x40080000  # REQUIRED: confirm the FD window against the stock LK on hardware
-size = 0x300000    # must match the FDF FD size (FD_SIZE)
+base = 0x40000000
+size = 0x00400000
 
 #
 # Android Boot Image Kernel Configs
@@ -28,17 +31,10 @@ size = 0x300000    # must match the FDF FD size (FD_SIZE)
 [boot_image_kernel]
 kernel_compression = "gzip"
 append_dtb         = false
+mtk_header         = false
 
 #
 # Android Boot Image Configs
 #
 [boot_image]
-base           = 0x40000000  # DRAM entry the stock LK addresses are relative to
-cmdline        = "bootopt=64S3,32N2,64N2"  # stock vendor_boot cmdline; stock boot.img carries none
-dtb            = "Resources/DTBs/tb365fc.dtb"
-dtb_offset     = 0x07C80000  # stock vendor_boot dtb_addr 0x47C80000
-header_version = 2           # self-built image; the stock image is v4 (no addresses)
-kernel_offset  = 0x00080000  # 0x40080000 == [uefi_fd].base
-pagesize       = 4096        # stock image page size
-ramdisk_offset = 0x26F00000  # stock vendor_boot ramdisk_addr 0x66F00000
-tags_offset    = 0x07C80000  # stock vendor_boot tags_addr 0x47C80000
+header_version = 4

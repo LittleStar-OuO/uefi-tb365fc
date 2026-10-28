@@ -3,8 +3,10 @@
   SPDX-License-Identifier: BSD-2-Clause-Patent
 **/
 
+#include <Library/BaseLib.h>
 #include <Library/PcdLib.h>
 #include <Library/DebugLib.h>
+#include <Library/PrintLib.h>
 #include <Library/PrePiLib.h>
 #include <Library/DebugAgentLib.h>
 #include <Library/BaseMemoryLib.h>
@@ -15,6 +17,7 @@
 #include <Library/MemoryMapHelperLib.h>
 #include <Library/TimerLib.h>
 #include <Library/HobLib.h>
+#include <Library/StageBeacon.h>
 
 #include "Sec.h"
 
@@ -22,7 +25,16 @@
 extern UINT64  gSecEntryArg0;
 
 // Helper.S: clean and invalidate every data cache level by set/way
-extern VOID  SecCleanInvalidateDataCacheAll (VOID);
+extern VOID SecCleanInvalidateDataCacheAll (VOID);
+
+STATIC
+VOID
+SecTrace (
+  IN CONST CHAR8  *Text
+  )
+{
+  SerialPortWrite ((UINT8 *)Text, AsciiStrLen (Text));
+}
 
 #ifndef MDEPKG_NDEBUG
 STATIC
@@ -37,7 +49,15 @@ ClearFrameBuffer (VOID)
 
   // Clear Memory Region
   if (FrameBufferRegion.Address != 0 && FrameBufferRegion.Length != 0) {
-    ZeroMem ((VOID *)FrameBufferRegion.Address, FrameBufferRegion.Length);
+    // Clear everything but the console cursor stored in the last 8 bytes
+    ZeroMem (
+      (VOID *)FrameBufferRegion.Address,
+      FrameBufferRegion.Length - 8
+      );
+
+    // Reset the console cursor stored in the last 8 bytes
+    *(volatile UINT32 *)(UINTN)(FrameBufferRegion.Address + FrameBufferRegion.Length - 8) = 0;
+    *(volatile UINT32 *)(UINTN)(FrameBufferRegion.Address + FrameBufferRegion.Length - 4) = 0;
   }
 }
 
@@ -99,9 +119,18 @@ VOID
 SecMain (VOID)
 {
   EFI_STATUS Status;
+  CHAR8      TraceBuffer[128];
+
+  // Beacon 2: C entry of SEC reached
+  StageBeacon (2);
+
+  SecTrace ("SEC 1: enter\n");
 
   // Do Platform Specific Initialization
   PlatformInitialize ();
+  StageBeacon (3);
+
+  SecTrace ("SEC 2: platform\n");
 
 #ifndef MDEPKG_NDEBUG
   // Initialize Serial Port
@@ -112,6 +141,19 @@ SecMain (VOID)
 
   // Print Firmware Version
   PrintFirmwareVersion ();
+  StageBeacon (4);
+
+  SecTrace ("SEC 3: banner\n");
+
+  AsciiSPrint (
+    TraceBuffer,
+    sizeof (TraceBuffer),
+    "SEC 4: fd=%lx size=%x stk=%lx\n",
+    FixedPcdGet64 (PcdFdBaseAddress),
+    FixedPcdGet32 (PcdFdSize),
+    FixedPcdGet64 (PcdCPUCoresStackBase)
+    );
+  SecTrace (TraceBuffer);
 
   // Initialize Debug Agent
   InitializeDebugAgent (DEBUG_AGENT_INIT_POSTMEM_SEC, NULL, NULL);
@@ -121,8 +163,12 @@ SecMain (VOID)
   // Initialize Memory
   Status = InitializeMemory ();
   if (EFI_ERROR (Status)) {
+    SecTrace ("SEC 5: memory FAIL\n");
     return;
   }
+
+  SecTrace ("SEC 5: memory ok\n");
+  StageBeacon (5);
 
   // Build CPU HOB
   BuildCpuHob (ArmGetPhysicalAddressBits (), PcdGet8 (PcdPrePiCpuIoSize));
@@ -130,11 +176,17 @@ SecMain (VOID)
   // Set the Boot Mode
   SetBootMode (BOOT_WITH_DEFAULT_SETTINGS);
 
+  SecTrace ("SEC 6: cpu hob\n");
+
   // Initialize Platform HOBs
   Status = PlatformPeim ();
   if (EFI_ERROR (Status)) {
+    SecTrace ("SEC 7: platform peim FAIL\n");
     return;
   }
+
+  SecTrace ("SEC 7: platform peim ok\n");
+  StageBeacon (6);
 
   // Pass on what the previous stage handed over in x0 (a DT address for a
   // Linux-style boot loader), so a DXE driver can use it.
@@ -147,27 +199,41 @@ SecMain (VOID)
   // Run Library Cconstructors
   ProcessLibraryConstructorList ();
 
+  SecTrace ("SEC 8: constructors\n");
+  StageBeacon (7);
+
   // Decompress all FVs
   Status = DecompressFirstFv ();
   if (EFI_ERROR (Status)) {
     DEBUG ((EFI_D_ERROR, "Failed to Decompress FV! Status = %r\n", Status));
+    SecTrace ("SEC 9: fv FAIL\n");
     return;
   }
+
+  SecTrace ("SEC 9: fv ok\n");
+  StageBeacon (8);
 
   // Load DXE Core
   Status = LoadDxeCoreFromFv (NULL, 0);
   if (EFI_ERROR (Status)) {
     DEBUG ((EFI_D_ERROR, "Failed to Load DXE Core! Status = %r\n", Status));
+    SecTrace ("SEC10: dxe FAIL\n");
+  } else {
+    SecTrace ("SEC10: dxe ok\n");
   }
+
+  // Beacon 22: LoadDxeCoreFromFv returned, DXE Core never took over
+  StageBeacon (22);
 }
 
 VOID
 SecEntry (VOID)
 {
+  // Beacon 1: C entry of SecEntry reached
+  StageBeacon (1);
+
   // The previous stage ran with its caches on. Clean and invalidate them
-  // before anything else: the UEFI writes its HOB tables and heap with the
-  // MMU and caches off, and lines the previous stage left would hide those
-  // writes (or be written back over them) once the caches are on.
+  // before the HOB tables and heap are written with the MMU and caches off.
   SecCleanInvalidateDataCacheAll ();
 
   // Disable Data Cache

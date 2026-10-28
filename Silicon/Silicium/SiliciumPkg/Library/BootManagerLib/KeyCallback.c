@@ -15,9 +15,10 @@
 //
 // Global Variables
 //
-STATIC EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *mSimpleInExProtocol  = NULL;
-STATIC VOID                              *mNotifyHandle        = NULL;
-STATIC BOOLEAN                            mEnterBootManager    = FALSE;
+STATIC EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *mSimpleInExProtocol     = NULL;
+STATIC VOID                              *mNotifyHandleUp        = NULL;
+STATIC VOID                              *mNotifyHandleEnter     = NULL;
+STATIC BOOLEAN                            mEnterBootManager      = FALSE;
 
 EFI_STATUS
 EFIAPI
@@ -32,35 +33,53 @@ KeyNotify (IN EFI_KEY_DATA *KeyData)
 EFI_STATUS
 SetupKeypad (IN EFI_DEVICE_PATH_PROTOCOL *DevicePath)
 {
-  EFI_STATUS  Status;
-  EFI_HANDLE  StiHandle;
-  EFI_HANDLE *KeypadBuffer;
-  UINTN       KeypadCount;
+  EFI_STATUS                Status;
+  EFI_STATUS                ConnectStatus;
+  EFI_HANDLE                StiHandle;
+  EFI_HANDLE                *KeypadBuffer;
+  UINTN                     KeypadCount;
+  VOID                      *Sti;
+  EFI_DEVICE_PATH_PROTOCOL  *Path;
 
   // Locate Keypad Controller Protocols
   Status = gBS->LocateHandleBuffer (ByProtocol, &gKeypadDeviceProtocolGuid, NULL, &KeypadCount, &KeypadBuffer);
-  if (!EFI_ERROR (Status)) {
-    // Start all Keypad Controllers
+  if (EFI_ERROR (Status)) {
+    DEBUG ((EFI_D_ERROR, "%a: no keypad handles (%r)\n", __FUNCTION__, Status));
+    KeypadCount = 0;
+  } else {
+    DEBUG ((EFI_D_ERROR, "%a: %u keypad handle(s)\n", __FUNCTION__, (UINT32)KeypadCount));
+
+    // Start all Keypad Controllers and take the STIEx they install on the
+    // controller handle itself (the driver model installs it there, so a
+    // device path lookup on the console variable is not needed).
     for (UINTN i = 0; i < KeypadCount; i++) {
-      gBS->ConnectController (KeypadBuffer[i], NULL, NULL, TRUE);
+      ConnectStatus = gBS->ConnectController (KeypadBuffer[i], NULL, NULL, TRUE);
+
+      Sti    = NULL;
+      Status = gBS->HandleProtocol (KeypadBuffer[i], &gEfiSimpleTextInputExProtocolGuid, &Sti);
+      DEBUG ((EFI_D_ERROR, "%a: kpd %u connect=%r stiex=%r\n", __FUNCTION__, (UINT32)i, ConnectStatus, Status));
+      if (!EFI_ERROR (Status) && (Sti != NULL) && (mSimpleInExProtocol == NULL)) {
+        mSimpleInExProtocol = Sti;
+      }
     }
 
     // Free Buffer
     FreePool (KeypadBuffer);
   }
 
-  // Locate STI Protocol Handle
-  Status = gBS->LocateDevicePath (&gEfiSimpleTextInputExProtocolGuid, &DevicePath, &StiHandle);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "%a: Failed to Locate STI Device Path! Status = %r\n", __FUNCTION__, Status));
-    return Status;
+  // Last resort: walk the console device path the same way the stock BDS did
+  if (mSimpleInExProtocol == NULL) {
+    Path   = DevicePath;
+    Status = gBS->LocateDevicePath (&gEfiSimpleTextInputExProtocolGuid, &Path, &StiHandle);
+    if (!EFI_ERROR (Status)) {
+      Status = gBS->HandleProtocol (StiHandle, &gEfiSimpleTextInputExProtocolGuid, (VOID **)&mSimpleInExProtocol);
+    }
+
+    DEBUG ((EFI_D_ERROR, "%a: path stiex=%r\n", __FUNCTION__, Status));
   }
 
-  // Get STI Protocol from Handle
-  Status = gBS->HandleProtocol (StiHandle, &gEfiSimpleTextInputExProtocolGuid, (VOID *)&mSimpleInExProtocol);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "%a: Failed to get STI Protocol from Handle! Status = %r\n", __FUNCTION__, Status));
-    return Status;
+  if (mSimpleInExProtocol == NULL) {
+    return EFI_NOT_FOUND;
   }
 
   // Reset STI Device
@@ -78,16 +97,23 @@ RegisterKeyNotify ()
   EFI_STATUS   Status;
   EFI_KEY_DATA KeyData;
 
-  // Set Key Data
+  // Register Volume Up Key Notify
   KeyData.KeyState.KeyToggleState = 0;
   KeyData.KeyState.KeyShiftState  = 0;
   KeyData.Key.UnicodeChar         = CHAR_NULL;
   KeyData.Key.ScanCode            = SCAN_UP;
-
-  // Register Volume Up Key Notify
-  Status = mSimpleInExProtocol->RegisterKeyNotify (mSimpleInExProtocol, &KeyData, &KeyNotify, &mNotifyHandle);
+  Status                          = mSimpleInExProtocol->RegisterKeyNotify (mSimpleInExProtocol, &KeyData, &KeyNotify, &mNotifyHandleUp);
   if (EFI_ERROR (Status)) {
     DEBUG ((EFI_D_ERROR, "%a: Failed to Register Volume Up Key Notify! Status = %r\n", __FUNCTION__, Status));
+    return Status;
+  }
+
+  // The keypad reports a held Volume Up as Enter, accept that as well
+  KeyData.Key.UnicodeChar = CHAR_CARRIAGE_RETURN;
+  KeyData.Key.ScanCode    = SCAN_NULL;
+  Status                  = mSimpleInExProtocol->RegisterKeyNotify (mSimpleInExProtocol, &KeyData, &KeyNotify, &mNotifyHandleEnter);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((EFI_D_ERROR, "%a: Failed to Register Enter Key Notify! Status = %r\n", __FUNCTION__, Status));
     return Status;
   }
 
@@ -120,14 +146,48 @@ UnregisterKeyCallback ()
   EFI_STATUS Status;
 
   // Verify STI Protocol Presense & Key Notify
-  if (mSimpleInExProtocol == NULL || mNotifyHandle == NULL) {
+  if (mSimpleInExProtocol == NULL) {
     return;
   }
 
-  // Unregister Volume Up Key Notify
-  Status = mSimpleInExProtocol->UnregisterKeyNotify (mSimpleInExProtocol, mNotifyHandle);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((EFI_D_ERROR, "%a: Failed to Unregister Volume Up Key Notify! Status = %r\n", __FUNCTION__, Status));
+  if (mNotifyHandleUp != NULL) {
+    Status = mSimpleInExProtocol->UnregisterKeyNotify (mSimpleInExProtocol, mNotifyHandleUp);
+    if (EFI_ERROR (Status)) {
+      DEBUG ((EFI_D_ERROR, "%a: Failed to Unregister Volume Up Key Notify! Status = %r\n", __FUNCTION__, Status));
+    }
+
+    mNotifyHandleUp = NULL;
+  }
+
+  if (mNotifyHandleEnter != NULL) {
+    Status = mSimpleInExProtocol->UnregisterKeyNotify (mSimpleInExProtocol, mNotifyHandleEnter);
+    if (EFI_ERROR (Status)) {
+      DEBUG ((EFI_D_ERROR, "%a: Failed to Unregister Enter Key Notify! Status = %r\n", __FUNCTION__, Status));
+    }
+
+    mNotifyHandleEnter = NULL;
+  }
+}
+
+VOID
+PollBootManagerKey ()
+{
+  EFI_KEY_DATA KeyData;
+
+  if (mSimpleInExProtocol == NULL) {
+    return;
+  }
+
+  // Catch keys the notify callbacks could not see (for example one that was
+  // still queued when the BDS wait ended).
+  for (UINTN i = 0; i < 32; i++) {
+    if (EFI_ERROR (mSimpleInExProtocol->ReadKeyStrokeEx (mSimpleInExProtocol, &KeyData))) {
+      break;
+    }
+
+    if ((KeyData.Key.ScanCode == SCAN_UP) || (KeyData.Key.UnicodeChar == CHAR_CARRIAGE_RETURN)) {
+      mEnterBootManager = TRUE;
+    }
   }
 }
 

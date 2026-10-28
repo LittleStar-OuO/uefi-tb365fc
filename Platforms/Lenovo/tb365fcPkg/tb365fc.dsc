@@ -66,7 +66,6 @@
   gSiliciumPkgTokenSpaceGuid.PcdFrameBufferWidth|2560
   gSiliciumPkgTokenSpaceGuid.PcdFrameBufferHeight|1600
   gSiliciumPkgTokenSpaceGuid.PcdFrameBufferColorDepth|32
-  gSiliciumPkgTokenSpaceGuid.PcdFrameBufferXOffset|0
 
   #
   # Storage

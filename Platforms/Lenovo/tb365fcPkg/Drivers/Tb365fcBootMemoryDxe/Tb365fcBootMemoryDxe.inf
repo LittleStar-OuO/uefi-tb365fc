@@ -1,0 +1,37 @@
+[Defines]
+  INF_VERSION                    = 0x0001001B
+  BASE_NAME                      = Tb365fcBootMemoryDxe
+  FILE_GUID                      = D855B953-83DF-47FF-B4D4-138C3A3666A7
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = Tb365fcBootMemoryDxeEntry
+
+[Sources]
+  Tb365fcBootMemoryDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  SiliciumPkg/SiliciumPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DxeServicesTableLib
+  FdtLib
+  HobLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Guids]
+  gSiliciumEntryArgHobGuid                      ## CONSUMES
+
+[Protocols]
+  gEfiBlockIoProtocolGuid                       ## PRODUCES
+  gEfiSdMmcPassThruProtocolGuid                 ## CONSUMES
+  gEfiDevicePathProtocolGuid                    ## PRODUCES
+  gEfiCpuArchProtocolGuid                       ## CONSUMES
+
+[Depex]
+  gEfiCpuArchProtocolGuid

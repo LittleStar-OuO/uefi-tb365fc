@@ -1,0 +1,375 @@
+diff --git a/ArmPkg/Drivers/ArmGicDxe/GicV3/ArmGicV3Dxe.c b/ArmPkg/Drivers/ArmGicDxe/GicV3/ArmGicV3Dxe.c
+index 5fd28e3f57..2e788d4038 100644
+--- a/ArmPkg/Drivers/ArmGicDxe/GicV3/ArmGicV3Dxe.c
++++ b/ArmPkg/Drivers/ArmGicDxe/GicV3/ArmGicV3Dxe.c
+@@ -505,6 +505,7 @@ GicV3IrqInterruptHandler (
+     (*InterruptHandlerPtr)(GicInterrupt, SystemContext);
+   } else {
+     DEBUG ((DEBUG_ERROR, "Spurious GIC interrupt: 0x%x\n", (UINT32)GicInterrupt));
++    GicV3DisableInterruptSource (&gHardwareInterruptV3Protocol, GicInterrupt);
+     GicV3EndOfInterrupt (&gHardwareInterruptV3Protocol, GicInterrupt);
+   }
+ }
+@@ -786,6 +787,28 @@ GicV3DxeInitialize (
+ 
+   mGicRedistributorBase = GicGetCpuRedistributorBase (PcdGet64 (PcdGicRedistributorsBase));
+ 
++  /*
++   * Camellia: Linux may leave this CPU's redistributor asleep and with the
++   * SGI/PPI frame configured; accesses to GICR_ISENABLER0 then never
++   * complete. Wake it and reset the private interrupt frame.
++   */
++  RegValue = MmioRead32 (mGicRedistributorBase + 0x0014); /* GICR_WAKER */
++  MmioWrite32 (mGicRedistributorBase + 0x0014, RegValue & ~(UINT32)(1 << 1));
++  while ((MmioRead32 (mGicRedistributorBase + 0x0014) & (1 << 2)) != 0) {
++    /* wait for ChildrenAsleep to clear */
++  }
++
++  /* Disable all SGIs/PPIs and give them the default priority. */
++  MmioWrite32 (mGicRedistributorBase + ARM_GICR_CTLR_FRAME_SIZE + ARM_GICR_ICENABLER, 0xffffffff);
++  MmioWrite32 (mGicRedistributorBase + ARM_GICR_CTLR_FRAME_SIZE + ARM_GICR_ICENABLER + 4, 0xffffffff);
++  MmioWrite32 (mGicRedistributorBase + ARM_GICR_CTLR_FRAME_SIZE + ARM_GICR_ICPENDR, 0xffffffff);
++  MmioWrite32 (mGicRedistributorBase + ARM_GICR_CTLR_FRAME_SIZE + ARM_GICR_ICPENDR + 4, 0xffffffff);
++  MmioWrite32 (mGicRedistributorBase + ARM_GICR_CTLR_FRAME_SIZE + ARM_GICR_ICACTIVER, 0xffffffff);
++  MmioWrite32 (mGicRedistributorBase + ARM_GICR_CTLR_FRAME_SIZE + ARM_GICR_ICACTIVER + 4, 0xffffffff);
++  for (Index = 0; Index < 32; Index++) {
++    MmioWrite8 (mGicRedistributorBase + ARM_GICR_CTLR_FRAME_SIZE + ARM_GIC_ICDIPR + Index, ARM_GIC_DEFAULT_PRIORITY);
++  }
++
+   RegValue = ArmGicV3GetControlSystemRegisterEnable ();
+   if ((RegValue & ICC_SRE_EL2_SRE) == 0) {
+     ArmGicV3SetControlSystemRegisterEnable (RegValue | ICC_SRE_EL2_SRE);
+diff --git a/ArmPkg/Drivers/TimerDxe/TimerDxe.c b/ArmPkg/Drivers/TimerDxe/TimerDxe.c
+index b7f5ecca56..e6b71fd40d 100644
+--- a/ArmPkg/Drivers/TimerDxe/TimerDxe.c
++++ b/ArmPkg/Drivers/TimerDxe/TimerDxe.c
+@@ -393,18 +393,26 @@ TimerInitialize (
+     TimerSecIntrNum  = PcdGet32 (PcdArmArchTimerSecIntrNum);
+     TimerIntrNum     = PcdGet32 (PcdArmArchTimerIntrNum);
+   }
++  (VOID)TimerVirtIntrNum;
++  (VOID)TimerHypIntrNum;
++  (VOID)TimerSecIntrNum;
+ 
+-  // Install secure and Non-secure interrupt handlers
+-  // Note: Because it is not possible to determine the security state of the
+-  // CPU dynamically, we just install interrupt handler for both sec and non-sec
+-  // timer PPI
+-  Status = gInterrupt->RegisterInterruptSource (gInterrupt, TimerVirtIntrNum, TimerInterruptHandler);
+-  ASSERT_EFI_ERROR (Status);
++  /*
++   * Camellia starts from Linux in the non-secure world. The virtual timer and
++   * its PPI belong to the interrupted Linux state; this driver uses the
++   * physical counter and must not claim the virtual source.
++   */
+ 
+   //
+   // The hypervisor timer interrupt may be omitted by implementations that
+   // execute under virtualization.
+   //
++  /*
++   * Camellia: started from the non-secure Linux world, the hypervisor and
++   * secure timer PPIs cannot be configured here, and the virtual timer belongs
++   * to the interrupted Linux state. Only the physical PPI is registered.
++   */
++  #if 0
+   if (TimerHypIntrNum != 0) {
+     Status = gInterrupt->RegisterInterruptSource (gInterrupt, TimerHypIntrNum, TimerInterruptHandler);
+     ASSERT_EFI_ERROR (Status);
+@@ -412,6 +420,7 @@ TimerInitialize (
+ 
+   Status = gInterrupt->RegisterInterruptSource (gInterrupt, TimerSecIntrNum, TimerInterruptHandler);
+   ASSERT_EFI_ERROR (Status);
++  #endif
+ 
+   Status = gInterrupt->RegisterInterruptSource (gInterrupt, TimerIntrNum, TimerInterruptHandler);
+   ASSERT_EFI_ERROR (Status);
+diff --git a/ArmPkg/Include/Library/ArmGicLib.h b/ArmPkg/Include/Library/ArmGicLib.h
+index f50128ed80..4da3554180 100644
+--- a/ArmPkg/Include/Library/ArmGicLib.h
++++ b/ArmPkg/Include/Library/ArmGicLib.h
+@@ -133,6 +133,8 @@
+ // GIC SGI & PPI Redistributor frame
+ #define ARM_GICR_ISENABLER  0x0100      // Interrupt Set-Enable Registers
+ #define ARM_GICR_ICENABLER  0x0180      // Interrupt Clear-Enable Registers
++#define ARM_GICR_ICPENDR    0x0280      // Interrupt Clear-Pending Registers
++#define ARM_GICR_ICACTIVER  0x0380      // Interrupt Clear-Active Registers
+ 
+ // GIC Cpu interface
+ #define ARM_GIC_ICCICR   0x00         // CPU Interface Control Register
+diff --git a/MdeModulePkg/Core/Dxe/DxeMain/DxeMain.c b/MdeModulePkg/Core/Dxe/DxeMain/DxeMain.c
+index 3c20568655..7477a1dc06 100644
+--- a/MdeModulePkg/Core/Dxe/DxeMain/DxeMain.c
++++ b/MdeModulePkg/Core/Dxe/DxeMain/DxeMain.c
+@@ -398,11 +398,11 @@ DxeMain (
+     gDxeCoreImageHandle
+     );
+ 
+-  DEBUG ((DEBUG_INFO | DEBUG_LOAD, "HOBLIST address in DXE = 0x%p\n", HobStart));
+ 
+   DEBUG_CODE_BEGIN ();
+   EFI_PEI_HOB_POINTERS  Hob;
+ 
++#if 0
+   for (Hob.Raw = HobStart; !END_OF_HOB_LIST (Hob); Hob.Raw = GET_NEXT_HOB (Hob)) {
+     if (GET_HOB_TYPE (Hob) == EFI_HOB_TYPE_MEMORY_ALLOCATION) {
+       DEBUG ((
+@@ -414,6 +414,7 @@ DxeMain (
+         ));
+     }
+   }
++#endif
+ 
+   for (Hob.Raw = HobStart; !END_OF_HOB_LIST (Hob); Hob.Raw = GET_NEXT_HOB (Hob)) {
+     if (GET_HOB_TYPE (Hob) == EFI_HOB_TYPE_FV) {
+diff --git a/UefiCpuPkg/Library/CpuExceptionHandlerLib/AArch64/CpuExceptionHandlerLib.c b/UefiCpuPkg/Library/CpuExceptionHandlerLib/AArch64/CpuExceptionHandlerLib.c
+index 9116ba9d96..8ab37ee39c 100644
+--- a/UefiCpuPkg/Library/CpuExceptionHandlerLib/AArch64/CpuExceptionHandlerLib.c
++++ b/UefiCpuPkg/Library/CpuExceptionHandlerLib/AArch64/CpuExceptionHandlerLib.c
+@@ -44,6 +44,35 @@ STATIC CHAR8  *mExceptionTypeString[] = {
+ 
+ STATIC BOOLEAN  mRecursiveException;
+ 
++STATIC
++VOID
++SerialWriteAscii (
++  IN CONST CHAR8  *Text
++  )
++{
++  while (*Text != '\0') {
++    SerialPortWrite ((UINT8 *)Text, 1);
++    Text++;
++  }
++}
++
++STATIC
++VOID
++SerialWriteHex32 (
++  IN UINT32  Value
++  )
++{
++  STATIC CONST CHAR8  Hex[] = "0123456789ABCDEF";
++  CHAR8               Text[8];
++  UINTN               Index;
++
++  for (Index = 0; Index < ARRAY_SIZE (Text); Index++) {
++    Text[Index] = Hex[(Value >> ((ARRAY_SIZE (Text) - Index - 1) * 4)) & 0xF];
++  }
++
++  SerialPortWrite ((UINT8 *)Text, sizeof (Text));
++}
++
+ /**
+   Decodes and logs the fault cause of an Instruction or Data Abort
+   by mapping the Fault Status Code bits [5:0] of the ISS field to
+@@ -148,6 +177,7 @@ DescribeInstructionOrDataAbort (
+                    Syndrome (ISS).
+ **/
+ STATIC
++__attribute__((unused))
+ VOID
+ DescribeExceptionSyndrome (
+   IN UINT64  Esr
+@@ -192,6 +222,7 @@ DescribeExceptionSyndrome (
+            memory within the original FullName buffer.
+ **/
+ STATIC
++__attribute__((unused))
+ CONST CHAR8 *
+ BaseName (
+   IN  CONST CHAR8  *FullName
+@@ -291,151 +322,32 @@ DumpCpuContext (
+   IN OUT EFI_SYSTEM_CONTEXT  SystemContext
+   )
+ {
+-  CHAR8   Buffer[MAX_PRINT_CHARS];
+-  CHAR16  UnicodeBuffer[MAX_PRINT_CHARS];
+-  UINTN   CharCount;
+-  INT32   Offset;
+-
+   if (mRecursiveException) {
+-    STATIC CHAR8 CONST  Message[] = "\nRecursive exception occurred while dumping the CPU state\n";
+-    SerialPortWrite ((UINT8 *)Message, sizeof Message - 1);
++    SerialWriteAscii ("\fRECURSIVE EXCEPTION\n");
+     CpuDeadLoop ();
+   }
+ 
+   mRecursiveException = TRUE;
+ 
+-  CharCount = AsciiSPrint (Buffer, sizeof (Buffer), "\n\n%a Exception at 0x%016lx\n", mExceptionTypeString[ExceptionType], SystemContext.SystemContextAArch64->ELR);
+-  SerialPortWrite ((UINT8 *)Buffer, CharCount);
+-
+-  // Prepare a unicode buffer for ConOut, if applicable, in case the buffer
+-  // gets reused.
+-  UnicodeSPrintAsciiFormat (UnicodeBuffer, MAX_PRINT_CHARS, Buffer);
+-
+-  DEBUG_CODE_BEGIN ();
+-  CHAR8   *Pdb, *PrevPdb;
+-  UINTN   ImageBase;
+-  UINTN   PeCoffSizeOfHeader;
+-  UINT64  *Fp;
+-  UINT64  RootFp[2];
+-  UINTN   Idx;
+-
+-  PrevPdb = Pdb = GetImageName (SystemContext.SystemContextAArch64->ELR, &ImageBase, &PeCoffSizeOfHeader);
+-  if (Pdb != NULL) {
+-    DEBUG ((
+-      DEBUG_ERROR,
+-      "PC 0x%012lx (0x%012lx+0x%08x) [ 0] %a\n",
+-      SystemContext.SystemContextAArch64->ELR,
+-      ImageBase,
+-      SystemContext.SystemContextAArch64->ELR - ImageBase,
+-      BaseName (Pdb)
+-      ));
+-  } else {
+-    DEBUG ((DEBUG_ERROR, "PC 0x%012lx\n", SystemContext.SystemContextAArch64->ELR));
+-  }
+-
+-  if ((UINT64 *)SystemContext.SystemContextAArch64->FP != 0) {
+-    Idx = 0;
+-
+-    RootFp[0] = ((UINT64 *)SystemContext.SystemContextAArch64->FP)[0];
+-    RootFp[1] = ((UINT64 *)SystemContext.SystemContextAArch64->FP)[1];
+-    if (RootFp[1] != SystemContext.SystemContextAArch64->LR) {
+-      RootFp[0] = SystemContext.SystemContextAArch64->FP;
+-      RootFp[1] = SystemContext.SystemContextAArch64->LR;
+-    }
+-
+-    for (Fp = RootFp; Fp[0] != 0; Fp = (UINT64 *)Fp[0]) {
+-      Pdb = GetImageName (Fp[1], &ImageBase, &PeCoffSizeOfHeader);
+-      if (Pdb != NULL) {
+-        if (Pdb != PrevPdb) {
+-          Idx++;
+-          PrevPdb = Pdb;
+-        }
+-
+-        DEBUG ((
+-          DEBUG_ERROR,
+-          "PC 0x%012lx (0x%012lx+0x%08x) [% 2d] %a\n",
+-          Fp[1],
+-          ImageBase,
+-          Fp[1] - ImageBase,
+-          Idx,
+-          BaseName (Pdb)
+-          ));
+-      } else {
+-        DEBUG ((DEBUG_ERROR, "PC 0x%012lx\n", Fp[1]));
+-      }
+-    }
+-
+-    PrevPdb = Pdb = GetImageName (SystemContext.SystemContextAArch64->ELR, &ImageBase, &PeCoffSizeOfHeader);
+-    if (Pdb != NULL) {
+-      DEBUG ((DEBUG_ERROR, "\n[ 0] %a\n", Pdb));
+-    }
+-
+-    Idx = 0;
+-    for (Fp = RootFp; Fp[0] != 0; Fp = (UINT64 *)Fp[0]) {
+-      Pdb = GetImageName (Fp[1], &ImageBase, &PeCoffSizeOfHeader);
+-      if ((Pdb != NULL) && (Pdb != PrevPdb)) {
+-        DEBUG ((DEBUG_ERROR, "[% 2d] %a\n", ++Idx, Pdb));
+-        PrevPdb = Pdb;
+-      }
+-    }
+-  }
+-
+-  DEBUG_CODE_END ();
+-
+-  DEBUG ((DEBUG_ERROR, "\n  X0 0x%016lx   X1 0x%016lx   X2 0x%016lx   X3 0x%016lx\n", SystemContext.SystemContextAArch64->X0, SystemContext.SystemContextAArch64->X1, SystemContext.SystemContextAArch64->X2, SystemContext.SystemContextAArch64->X3));
+-  DEBUG ((DEBUG_ERROR, "  X4 0x%016lx   X5 0x%016lx   X6 0x%016lx   X7 0x%016lx\n", SystemContext.SystemContextAArch64->X4, SystemContext.SystemContextAArch64->X5, SystemContext.SystemContextAArch64->X6, SystemContext.SystemContextAArch64->X7));
+-  DEBUG ((DEBUG_ERROR, "  X8 0x%016lx   X9 0x%016lx  X10 0x%016lx  X11 0x%016lx\n", SystemContext.SystemContextAArch64->X8, SystemContext.SystemContextAArch64->X9, SystemContext.SystemContextAArch64->X10, SystemContext.SystemContextAArch64->X11));
+-  DEBUG ((DEBUG_ERROR, " X12 0x%016lx  X13 0x%016lx  X14 0x%016lx  X15 0x%016lx\n", SystemContext.SystemContextAArch64->X12, SystemContext.SystemContextAArch64->X13, SystemContext.SystemContextAArch64->X14, SystemContext.SystemContextAArch64->X15));
+-  DEBUG ((DEBUG_ERROR, " X16 0x%016lx  X17 0x%016lx  X18 0x%016lx  X19 0x%016lx\n", SystemContext.SystemContextAArch64->X16, SystemContext.SystemContextAArch64->X17, SystemContext.SystemContextAArch64->X18, SystemContext.SystemContextAArch64->X19));
+-  DEBUG ((DEBUG_ERROR, " X20 0x%016lx  X21 0x%016lx  X22 0x%016lx  X23 0x%016lx\n", SystemContext.SystemContextAArch64->X20, SystemContext.SystemContextAArch64->X21, SystemContext.SystemContextAArch64->X22, SystemContext.SystemContextAArch64->X23));
+-  DEBUG ((DEBUG_ERROR, " X24 0x%016lx  X25 0x%016lx  X26 0x%016lx  X27 0x%016lx\n", SystemContext.SystemContextAArch64->X24, SystemContext.SystemContextAArch64->X25, SystemContext.SystemContextAArch64->X26, SystemContext.SystemContextAArch64->X27));
+-  DEBUG ((DEBUG_ERROR, " X28 0x%016lx   FP 0x%016lx   LR 0x%016lx  \n", SystemContext.SystemContextAArch64->X28, SystemContext.SystemContextAArch64->FP, SystemContext.SystemContextAArch64->LR));
+-
+-  /* We save these as 128bit numbers, but have to print them as two 64bit numbers,
+-     so swap the 64bit words to correctly represent a 128bit number.  */
+-  DEBUG ((DEBUG_ERROR, "\n  V0 0x%016lx %016lx   V1 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V0[1], SystemContext.SystemContextAArch64->V0[0], SystemContext.SystemContextAArch64->V1[1], SystemContext.SystemContextAArch64->V1[0]));
+-  DEBUG ((DEBUG_ERROR, "  V2 0x%016lx %016lx   V3 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V2[1], SystemContext.SystemContextAArch64->V2[0], SystemContext.SystemContextAArch64->V3[1], SystemContext.SystemContextAArch64->V3[0]));
+-  DEBUG ((DEBUG_ERROR, "  V4 0x%016lx %016lx   V5 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V4[1], SystemContext.SystemContextAArch64->V4[0], SystemContext.SystemContextAArch64->V5[1], SystemContext.SystemContextAArch64->V5[0]));
+-  DEBUG ((DEBUG_ERROR, "  V6 0x%016lx %016lx   V7 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V6[1], SystemContext.SystemContextAArch64->V6[0], SystemContext.SystemContextAArch64->V7[1], SystemContext.SystemContextAArch64->V7[0]));
+-  DEBUG ((DEBUG_ERROR, "  V8 0x%016lx %016lx   V9 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V8[1], SystemContext.SystemContextAArch64->V8[0], SystemContext.SystemContextAArch64->V9[1], SystemContext.SystemContextAArch64->V9[0]));
+-  DEBUG ((DEBUG_ERROR, " V10 0x%016lx %016lx  V11 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V10[1], SystemContext.SystemContextAArch64->V10[0], SystemContext.SystemContextAArch64->V11[1], SystemContext.SystemContextAArch64->V11[0]));
+-  DEBUG ((DEBUG_ERROR, " V12 0x%016lx %016lx  V13 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V12[1], SystemContext.SystemContextAArch64->V12[0], SystemContext.SystemContextAArch64->V13[1], SystemContext.SystemContextAArch64->V13[0]));
+-  DEBUG ((DEBUG_ERROR, " V14 0x%016lx %016lx  V15 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V14[1], SystemContext.SystemContextAArch64->V14[0], SystemContext.SystemContextAArch64->V15[1], SystemContext.SystemContextAArch64->V15[0]));
+-  DEBUG ((DEBUG_ERROR, " V16 0x%016lx %016lx  V17 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V16[1], SystemContext.SystemContextAArch64->V16[0], SystemContext.SystemContextAArch64->V17[1], SystemContext.SystemContextAArch64->V17[0]));
+-  DEBUG ((DEBUG_ERROR, " V18 0x%016lx %016lx  V19 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V18[1], SystemContext.SystemContextAArch64->V18[0], SystemContext.SystemContextAArch64->V19[1], SystemContext.SystemContextAArch64->V19[0]));
+-  DEBUG ((DEBUG_ERROR, " V20 0x%016lx %016lx  V21 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V20[1], SystemContext.SystemContextAArch64->V20[0], SystemContext.SystemContextAArch64->V21[1], SystemContext.SystemContextAArch64->V21[0]));
+-  DEBUG ((DEBUG_ERROR, " V22 0x%016lx %016lx  V23 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V22[1], SystemContext.SystemContextAArch64->V22[0], SystemContext.SystemContextAArch64->V23[1], SystemContext.SystemContextAArch64->V23[0]));
+-  DEBUG ((DEBUG_ERROR, " V24 0x%016lx %016lx  V25 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V24[1], SystemContext.SystemContextAArch64->V24[0], SystemContext.SystemContextAArch64->V25[1], SystemContext.SystemContextAArch64->V25[0]));
+-  DEBUG ((DEBUG_ERROR, " V26 0x%016lx %016lx  V27 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V26[1], SystemContext.SystemContextAArch64->V26[0], SystemContext.SystemContextAArch64->V27[1], SystemContext.SystemContextAArch64->V27[0]));
+-  DEBUG ((DEBUG_ERROR, " V28 0x%016lx %016lx  V29 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V28[1], SystemContext.SystemContextAArch64->V28[0], SystemContext.SystemContextAArch64->V29[1], SystemContext.SystemContextAArch64->V29[0]));
+-  DEBUG ((DEBUG_ERROR, " V30 0x%016lx %016lx  V31 0x%016lx %016lx\n", SystemContext.SystemContextAArch64->V30[1], SystemContext.SystemContextAArch64->V30[0], SystemContext.SystemContextAArch64->V31[1], SystemContext.SystemContextAArch64->V31[0]));
+-
+-  DEBUG ((DEBUG_ERROR, "\n  SP 0x%016lx  ELR 0x%016lx  SPSR 0x%08lx  FPSR 0x%08lx\n ESR 0x%08lx          FAR 0x%016lx\n", SystemContext.SystemContextAArch64->SP, SystemContext.SystemContextAArch64->ELR, SystemContext.SystemContextAArch64->SPSR, SystemContext.SystemContextAArch64->FPSR, SystemContext.SystemContextAArch64->ESR, SystemContext.SystemContextAArch64->FAR));
+-
+-  DEBUG ((DEBUG_ERROR, "\n ESR : EC 0x%02x  IL 0x%x  ISS 0x%08x\n", (SystemContext.SystemContextAArch64->ESR & 0xFC000000) >> 26, (SystemContext.SystemContextAArch64->ESR >> 25) & 0x1, SystemContext.SystemContextAArch64->ESR & 0x1FFFFFF));
+-
+-  DescribeExceptionSyndrome (SystemContext.SystemContextAArch64->ESR);
+-
+-  DEBUG ((DEBUG_ERROR, "\nStack dump:\n"));
+-  for (Offset = -256; Offset < 256; Offset += 32) {
+-    DEBUG ((
+-      DEBUG_ERROR,
+-      "%c %013lx: %016lx %016lx %016lx %016lx\n",
+-      Offset == 0 ? '>' : ' ',
+-      SystemContext.SystemContextAArch64->SP + Offset,
+-      *(UINT64 *)(SystemContext.SystemContextAArch64->SP + Offset),
+-      *(UINT64 *)(SystemContext.SystemContextAArch64->SP + Offset + 8),
+-      *(UINT64 *)(SystemContext.SystemContextAArch64->SP + Offset + 16),
+-      *(UINT64 *)(SystemContext.SystemContextAArch64->SP + Offset + 24)
+-      ));
+-  }
+-
+-  // Attempt to print that we had a synchronous exception to ConOut.  We do
+-  // this after the serial logging as ConOut's logging is more complex and we
+-  // aren't guaranteed to succeed.
+-  LogToConsole (UnicodeBuffer);
+-
+-  ASSERT (FALSE);
++  SerialWriteAscii ("\fEXC ");
++  SerialWriteAscii (mExceptionTypeString[ExceptionType]);
++  SerialWriteAscii (" PC ");
++  SerialWriteHex32 ((UINT32)SystemContext.SystemContextAArch64->ELR);
++  SerialWriteAscii (" LR ");
++  SerialWriteHex32 ((UINT32)SystemContext.SystemContextAArch64->LR);
++  SerialWriteAscii (" X0 ");
++  SerialWriteHex32 ((UINT32)SystemContext.SystemContextAArch64->X0);
++  SerialWriteAscii (" X1 ");
++  SerialWriteHex32 ((UINT32)SystemContext.SystemContextAArch64->X1);
++  SerialWriteAscii (" X2 ");
++  SerialWriteHex32 ((UINT32)SystemContext.SystemContextAArch64->X2);
++  SerialWriteAscii ("\nESR ");
++  SerialWriteHex32 ((UINT32)SystemContext.SystemContextAArch64->ESR);
++  SerialWriteAscii (" FAR ");
++  SerialWriteHex32 ((UINT32)SystemContext.SystemContextAArch64->FAR);
++  SerialWriteAscii (" SP ");
++  SerialWriteHex32 ((UINT32)SystemContext.SystemContextAArch64->SP);
++  SerialWriteAscii ("\n");
+   CpuDeadLoop ();
+ }
+ 
+diff --git a/UefiCpuPkg/Library/CpuExceptionHandlerLib/AArch64/ExceptionSupport.S b/UefiCpuPkg/Library/CpuExceptionHandlerLib/AArch64/ExceptionSupport.S
+index 81b5225ac1..057b730207 100644
+--- a/UefiCpuPkg/Library/CpuExceptionHandlerLib/AArch64/ExceptionSupport.S
++++ b/UefiCpuPkg/Library/CpuExceptionHandlerLib/AArch64/ExceptionSupport.S
+@@ -188,15 +188,15 @@ ASM_PFX(SynchronousExceptionSPx):                                         \
+                                                                           \
+ VECTOR_ENTRY(ExceptionHandlersStart, ARM_VECTOR_CUR_SPX_IRQ)              \
+ ASM_PFX(IrqSPx):                                                          \
+-  ExceptionEntry  EXCEPT_AARCH64_IRQ                                     ;\
++  ExceptionEntry  EXCEPT_AARCH64_IRQ, SP0                                ;\
+                                                                           \
+ VECTOR_ENTRY(ExceptionHandlersStart, ARM_VECTOR_CUR_SPX_FIQ)              \
+ ASM_PFX(FiqSPx):                                                          \
+-  ExceptionEntry  EXCEPT_AARCH64_FIQ                                     ;\
++  ExceptionEntry  EXCEPT_AARCH64_FIQ, SP0                                ;\
+                                                                           \
+ VECTOR_ENTRY(ExceptionHandlersStart, ARM_VECTOR_CUR_SPX_SERR)             \
+ ASM_PFX(SErrorSPx):                                                       \
+-  ExceptionEntry  EXCEPT_AARCH64_SERROR                                  ;\
++  ExceptionEntry  EXCEPT_AARCH64_SERROR, SP0                             ;\
+                                                                           \
+ /* Lower EL using AArch64 : 0x400 - 0x580 */                              \
+ VECTOR_ENTRY(ExceptionHandlersStart, ARM_VECTOR_LOW_A64_SYNC)             \

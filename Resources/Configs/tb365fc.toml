@@ -1,0 +1,43 @@
+#
+# Lenovo TB365FC (MT6835) - UEFI FD and boot image geometry.
+#
+# Measured from the stock ZUXOS 1.1.10.122 package (tools/unpack_boot_image.py):
+#   - boot.img uses header v4 (page size 4096, no load addresses)
+#   - vendor_boot.img uses header v4: kernel_addr 0x40000000,
+#     ramdisk_addr 0x66F00000, tags_addr 0x47C80000, dtb_addr 0x47C80000
+#   - cmdline "bootopt=64S3,32N2,64N2"
+# The v4 header carries no addresses, so these come from the vendor_boot
+# header; the self-built image below is v2 so that LK loads BootShim+FD at
+# kernel_addr. That address is still the Plan A convention proven on merlinx
+# and camellia (FD base == kernel_addr == 0x40080000), not an observed LK
+# constant: the stock GKI kernel is loaded at 0x40000000, where our FD does
+# not fit because LK keeps its boot structures at the DRAM entry.
+#
+# The UEFI CPU stack (0x40000000 / 0x40000) lives below the FD; the
+# MemoryMapLib in Platforms/Lenovo/tb365fcPkg and mAvailableMemory in
+# Tb365fcBootMemoryDxe must agree with [uefi_fd].base.
+#
+[uefi_fd]
+base = 0x40080000  # REQUIRED: confirm the FD window against the stock LK on hardware
+size = 0x300000    # must match the FDF FV size
+
+#
+# Android Boot Image Kernel Configs
+#
+[boot_image_kernel]
+kernel_compression = "gzip"
+append_dtb         = false
+
+#
+# Android Boot Image Configs
+#
+[boot_image]
+base           = 0x40000000  # DRAM entry the stock LK addresses are relative to
+cmdline        = "bootopt=64S3,32N2,64N2"  # stock vendor_boot cmdline; stock boot.img carries none
+dtb            = "Resources/DTBs/tb365fc.dtb"
+dtb_offset     = 0x07C80000  # stock vendor_boot dtb_addr 0x47C80000
+header_version = 2           # self-built image; the stock image is v4 (no addresses)
+kernel_offset  = 0x00080000  # 0x40080000 == [uefi_fd].base
+pagesize       = 4096        # stock image page size
+ramdisk_offset = 0x26F00000  # stock vendor_boot ramdisk_addr 0x66F00000
+tags_offset    = 0x07C80000  # stock vendor_boot tags_addr 0x47C80000

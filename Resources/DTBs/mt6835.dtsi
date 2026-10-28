@@ -1,0 +1,126 @@
+/*
+ * Shared resources of the MediaTek MT6835 (Dimensity 6300 family).
+ *
+ * CPU topology, GIC ranges, timer frequency, PSCI conduit and UART registers are
+ * taken from the TB365FC stock DTB in vendor_boot.img (ZUXOS 1.1.10.122); method
+ * = "smc" matches the stock /psci node.
+ *
+ * Boards include this file and add memory, reserved regions and enabled peripherals.
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	interrupt-parent = <&gic>;
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* 13 MHz (0xc65d40) as published by the stock timer node. */
+		timebase-frequency = <13000000>;
+
+		/* 6x Cortex-A55, MPIDR affinity 0x0-0x500. */
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x0>;
+			enable-method = "psci";
+			unixnu,cluster-type = "E";
+		};
+
+		cpu1: cpu@100 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x100>;
+			enable-method = "psci";
+			unixnu,cluster-type = "E";
+		};
+
+		cpu2: cpu@200 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x200>;
+			enable-method = "psci";
+			unixnu,cluster-type = "E";
+		};
+
+		cpu3: cpu@300 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x300>;
+			enable-method = "psci";
+			unixnu,cluster-type = "E";
+		};
+
+		cpu4: cpu@400 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x400>;
+			enable-method = "psci";
+			unixnu,cluster-type = "E";
+		};
+
+		cpu5: cpu@500 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a55";
+			reg = <0x500>;
+			enable-method = "psci";
+			unixnu,cluster-type = "E";
+		};
+
+		/* 2x Cortex-A76, MPIDR affinity 0x600-0x700. */
+		cpu6: cpu@600 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a76";
+			reg = <0x600>;
+			enable-method = "psci";
+			unixnu,cluster-type = "P";
+		};
+
+		cpu7: cpu@700 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a76";
+			reg = <0x700>;
+			enable-method = "psci";
+			unixnu,cluster-type = "P";
+		};
+	};
+
+	psci {
+		compatible = "arm,psci-1.0";
+		method = "smc";
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&gic>;
+		interrupts = <1 13 4>,	/* secure physical */
+			     <1 14 4>,	/* non-secure physical */
+			     <1 11 4>,	/* virtual */
+			     <1 10 4>;	/* hypervisor */
+		clock-frequency = <13000000>;
+	};
+
+	/*
+	 * GICD 0x0C000000 (256 KiB), GICR 0x0C040000 (2 MiB). The stock tree uses
+	 * four-cell interrupt specifiers, where the trailing cell is a MediaTek
+	 * wakeup flag; the ADT uses the standard three-cell form.
+	 */
+	gic: interrupt-controller@c000000 {
+		compatible = "arm,gic-v3";
+		reg = <0x0 0x0c000000 0x0 0x40000>,
+		      <0x0 0x0c040000 0x0 0x200000>;
+		interrupt-controller;
+		#interrupt-cells = <3>;
+		unixnu,adt-name = "intc";
+	};
+
+	/* Stock serial@11002000 (uart_line 1); disabled until a board wires it up. */
+	uart0: serial@11002000 {
+		compatible = "mediatek,mt6577-uart";
+		reg = <0x0 0x11002000 0x0 0x1000>;
+		interrupts = <0 0x18e 4>;
+		status = "disabled";
+	};
+};

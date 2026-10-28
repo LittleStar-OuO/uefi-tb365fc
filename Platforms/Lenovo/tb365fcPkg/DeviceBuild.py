@@ -53,11 +53,18 @@ class SettingsManager (UpdateSettingsManager, SetupSettingsManager, PrEvalSettin
         return CommonPlatform.TargetsSupported
 
     def GetRequiredSubmodules (self):
+        #
+        # Recursion is off: the only nested module this platform needs is
+        # MdePkg/Library/BaseFdtLib/libfdt, and stuart would otherwise fetch
+        # every test/tool module under Mu_Basecore and openssl directly from
+        # github.com, ignoring the proxy set in the superproject config.
+        # Initialize libfdt by hand as described in PORTING.md.
+        #
         return [
-            RequiredSubmodule ("Common/Mu", True),
-            RequiredSubmodule ("Common/Mu_OEM_Sample", True),
-            RequiredSubmodule ("Mu_Basecore", True),
-            RequiredSubmodule ("Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl", True)
+            RequiredSubmodule ("Common/Mu", False),
+            RequiredSubmodule ("Common/Mu_OEM_Sample", False),
+            RequiredSubmodule ("Mu_Basecore", False),
+            RequiredSubmodule ("Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl", False)
         ]
 
     def SetArchitectures (self, list_of_requested_architectures):

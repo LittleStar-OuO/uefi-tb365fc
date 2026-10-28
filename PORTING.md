@@ -98,6 +98,22 @@ Mu blobs are checked out with CRLF while the patch files use LF, so a plain
 `git apply` rejects every hunk. `Camellia-Essential.patch` is Plan B-only and
 is deliberately left out of the list; `module/README.md` says the same.
 
+## Submodules
+
+The four required submodules are declared non-recursive in `DeviceBuild.py`,
+because stuart's recursive update always clones nested modules directly from
+`github.com` and ignores the proxy configured in the superproject. The only
+nested module the platform needs is FdtLib's libfdt; initialize it once with
+
+```
+git -C Mu_Basecore submodule update --init \
+    MdePkg/Library/BaseFdtLib/libfdt
+```
+
+Brotli, SPDM, cmocka and the openssl test modules are not referenced by the
+DSC and are intentionally not fetched.
+
+
 ## Before publication
 
 - Pin the Mu-Silicium baseline, the exact submodule commits and the

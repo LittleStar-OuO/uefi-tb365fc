@@ -1,0 +1,12 @@
+# Text files are stored and checked out with LF; the build runs on Linux
+# (WSL) and CRLF breaks shell scripts, makefiles and git apply.
+* text=auto eol=lf
+
+# Binary artifacts must never be converted or diffed as text.
+*.png binary
+*.jpg binary
+*.ico binary
+*.efi binary
+*.fd binary
+*.dtb binary
+*.bin binary

@@ -7,11 +7,12 @@
 #     ramdisk_addr 0x66F00000, tags_addr 0x47C80000, dtb_addr 0x47C80000
 #   - cmdline "bootopt=64S3,32N2,64N2"
 # The v4 header carries no addresses, so these come from the vendor_boot
-# header; the self-built image below is v2 so that LK loads BootShim+FD at
-# kernel_addr. That address is still the Plan A convention proven on merlinx
-# and camellia (FD base == kernel_addr == 0x40080000), not an observed LK
-# constant: the stock GKI kernel is loaded at 0x40000000, where our FD does
-# not fit because LK keeps its boot structures at the DRAM entry.
+# header; the self-built image below is v2 so that LK loads the FD (gzipped,
+# no BootShim in this image) at kernel_addr. That address is still the Plan A
+# convention proven on merlinx and camellia (FD base == kernel_addr ==
+# 0x40080000), not an observed LK constant: the stock GKI kernel is loaded at
+# 0x40000000, where our FD does not fit because LK keeps its boot structures
+# at the DRAM entry.
 #
 # The UEFI CPU stack (0x40000000 / 0x40000) lives below the FD; the
 # MemoryMapLib in Platforms/Lenovo/tb365fcPkg and mAvailableMemory in
@@ -19,7 +20,7 @@
 #
 [uefi_fd]
 base = 0x40080000  # REQUIRED: confirm the FD window against the stock LK on hardware
-size = 0x300000    # must match the FDF FV size
+size = 0x300000    # must match the FDF FD size (FD_SIZE)
 
 #
 # Android Boot Image Kernel Configs

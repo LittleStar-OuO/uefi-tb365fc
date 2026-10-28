@@ -102,16 +102,23 @@ is deliberately left out of the list; `module/README.md` says the same.
 
 The four required submodules are declared non-recursive in `DeviceBuild.py`,
 because stuart's recursive update always clones nested modules directly from
-`github.com` and ignores the proxy configured in the superproject. The only
-nested module the platform needs is FdtLib's libfdt; initialize it once with
+`github.com` and ignores the proxy configured in the superproject. The build
+still needs four nested modules: libfdt (FdtLib), mipisyst and brotli (MdePkg
+and MdeModulePkg list their include directories in their DECs, and the build
+rejects a DEC include path that is missing), and libspdm (SecurityPkg does the
+same; AuthVariableLib comes from that package). Initialize them once with
 
 ```
 git -C Mu_Basecore submodule update --init \
-    MdePkg/Library/BaseFdtLib/libfdt
+    MdePkg/Library/BaseFdtLib/libfdt \
+    MdePkg/Library/MipiSysTLib/mipisyst \
+    MdeModulePkg/Library/BrotliCustomDecompressLib/brotli \
+    SecurityPkg/DeviceSecurity/SpdmLib/libspdm
 ```
 
-Brotli, SPDM, cmocka and the openssl test modules are not referenced by the
-DSC and are intentionally not fetched.
+The commits are the gitlinks pinned by the Mu_Basecore commit, not branches.
+cmocka, googletest, subhook, oniguruma and BaseTools' own brotli copy are not
+in the package set of this DSC and are intentionally not fetched.
 
 ## Framework packages
 

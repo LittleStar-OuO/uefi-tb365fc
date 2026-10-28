@@ -113,6 +113,25 @@ git -C Mu_Basecore submodule update --init \
 Brotli, SPDM, cmocka and the openssl test modules are not referenced by the
 DSC and are intentionally not fetched.
 
+## Framework packages
+
+The DSC and FDF reference `UniXNUPkg` and `DarwinBootPkg`, which live in the
+UniXNU framework tree, not in this checkout. The `unixnu build firmware`
+driver supplies their roots through `board.toml [firmware] packages`
+(`{tree}/package`, `{tree}/drivers/DarwinBoot`). A standalone
+`build_uefi.py` run gets them through `TB365FC_PACKAGE_PATHS`, a
+path-separator list appended to the platform's package roots:
+
+```
+TB365FC_PACKAGE_PATHS=/path/to/UniXNU/package:/path/to/UniXNU/drivers/DarwinBoot
+```
+
+The first build used UniXNU `120067ccc43ebb5e76ec62c9219a48c897052838` and
+DarwinBoot `3325e352d7df68a9f9ad74832ed94a6acbbd7390`. Without the variable
+the DSC cannot resolve `UniXNULib` and the build stops in the pre-build
+override check.
+
+
 
 ## Before publication
 

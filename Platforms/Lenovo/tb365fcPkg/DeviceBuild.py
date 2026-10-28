@@ -37,6 +37,15 @@ class CommonPlatform ():
         "Silicon/MediaTek",
         "Silicon/Silicium"
     )
+    #
+    # The DSC and FDF reference UniXNUPkg and DarwinBootPkg, which live in the
+    # UniXNU framework tree rather than in this checkout. The unixnu firmware
+    # builder supplies their roots through board.toml [firmware] packages;
+    # a standalone build passes them here as a pathsep-separated list.
+    #
+    ExtraPackagesPath = tuple (
+        path for path in os.environ.get ("TB365FC_PACKAGE_PATHS", "").split (os.pathsep) if path
+    )
 
 # ####################################################################################### #
 #                         Configuration for Update & Setup                                #
@@ -106,7 +115,7 @@ class SettingsManager (UpdateSettingsManager, SetupSettingsManager, PrEvalSettin
         return "tb365fc"
 
     def GetPackagesPath (self):
-        return CommonPlatform.PackagesPath
+        return CommonPlatform.PackagesPath + CommonPlatform.ExtraPackagesPath
 
 # ####################################################################################### #
 #                         Actual Configuration for Platform Build                         #
@@ -129,6 +138,9 @@ class PlatformBuilder (UefiBuilder, BuildSettingsManager):
         result = [ shell_environment.GetBuildVars().GetValue("FEATURE_CONFIG_PATH", "") ]
 
         for a in CommonPlatform.PackagesPath:
+            result.append(a)
+
+        for a in CommonPlatform.ExtraPackagesPath:
             result.append(a)
 
         return result

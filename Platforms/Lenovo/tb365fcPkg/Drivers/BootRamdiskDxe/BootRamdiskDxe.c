@@ -1,28 +1,27 @@
 /** @file
-  Boot image ramdisk of Lenovo TB365FC as a read-only Block I/O device.
+  UniXNU payload of Lenovo TB365FC as a read-only Block I/O device.
 
   UniXNU ships its payload (configuration, kernel, ADT, trust cache) as a FAT
-  volume in the ramdisk of the Android boot image.
+  volume. This driver publishes it as a read-only, 512-byte-sector Block I/O
+  device, so Partition/Fat drivers mount the payload volume.
 
-  MTK LK strips the MediaTek "ROOTFS" header (magic 0x58881688, payload size
-  at +4, name at +8) when it reads the boot image, copies the payload to the
-  header ramdisk_addr and publishes that range in /chosen as
-  linux,initrd-start/-end. tb365fc.toml uses base 0x40000000 and
-  ramdisk_offset 0x26F00000, so the payload lands at 0x66F00000, the start of
-  the "Boot Ramdisk" region of MemoryMapLib.
+  Primary transport: the payload is the vendor_boot vendor_ramdisk. LK loads
+  it to ramdisk_addr 0x66F00000, appends the init_boot ramdisk after it, and
+  exposes both through linux,initrd-start/-end in /chosen, pointing at the
+  merged range. SEC keeps x0 (the DT copied to tags_addr 0x47C80000) in the
+  gSiliciumEntryArgHobGuid HOB. The initrd must lie inside the reserved "Boot
+  Ramdisk" region of the tb365fc memory map. The trailing init_boot ramdisk
+  makes the total size unaligned; the published range is rounded up to a
+  sector (it is still far below the 64 MiB region).
 
-  SEC keeps x0 (the DT copied to tags_addr 0x47C80000) in the
-  gSiliciumEntryArgHobGuid HOB. This driver takes the initrd range from
-  /chosen of that device tree, the address the loader actually used, and
-  publishes it as a read-only, 512-byte-sector Block I/O device, so
-  Partition/Fat drivers mount the payload volume. If the range still starts
-  with a MediaTek header (a loader that does not strip it), the 512-byte
-  header is skipped.
+  Fallback: an older transport appended a compressed payload to the UEFI FD
+  inside the boot image kernel gzip stream. It lands in the reserved "Boot
+  Payload" window at 0x40400000 and is only used when /chosen carries no
+  initrd, so a stale window cannot mask the ramdisk transport.
 
-  Both the device tree and the initrd must lie inside the "LK DTB" and
-  "Boot Ramdisk" regions of the tb365fc memory map; these are reserved, so no
-  firmware allocation can overwrite them. A range elsewhere is not published:
-  firmware allocations may already have overwritten it.
+  In both cases the payload is a FAT image; the compressed fallback adds a
+  16-byte wrapper (magic 'XNUZ', uncompressed size, compressed size,
+  reserved) followed by a UEFI-compressed FAT image.
 
   Derived from UniXNU/uefi-sheng shengPkg ShengBootMemoryDxe (initrd part).
 
@@ -38,6 +37,7 @@
 #include <Library/MemoryMapHelperLib.h>
 #include <Library/PrintLib.h>
 #include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiDecompressLib.h>
 #include <Library/UefiRuntimeServicesTableLib.h>
 #include <Protocol/BlockIo.h>
 #include <Protocol/DevicePath.h>
@@ -84,7 +84,42 @@ DiagInfo (
 #define MTK_HEADER_MAGIC  0x58881688U
 #define MTK_HEADER_SIZE   512
 
+//
+// Compressed payload: 16-byte wrapper (magic, uncompressed size, compressed
+// size, reserved) followed by a UEFI-compressed FAT image. LK may append the
+// vendor_boot ramdisk after this stream, so only the wrapper's compressed
+// size is consumed.
+//
+#define COMPRESSED_PAYLOAD_MAGIC         SIGNATURE_32 ('X', 'N', 'U', 'Z')
+#define COMPRESSED_PAYLOAD_HEADER_SIZE   16
+
+//
+// Bring-up diagnostic (diag71): what the payload holds at the prelink record
+// page and at the entry instruction, before the FAT driver reads it. The
+// offsets come from the payload walk in build-entry-hunt-71.sh, which refuses
+// to build if the geometry moves. The variable transport failed silently on
+// diag70, so the block is copied to a fixed page instead: the last page of
+// the 16 MiB boot payload window. DarwinBoot reads it into the entry-hunt
+// readback block. Remove once settled.
+//
+#define PAYLOAD_PROBE_MAGIC       0x3037505244ULL  /* "DRP70" */
+#define PAYLOAD_PROBE_VOL_REC     0x01917A00ULL
+#define PAYLOAD_PROBE_VOL_ENTRY   0x028B5688ULL
+#define PAYLOAD_PROBE_NAME_OFF    0x168
+#define PAYLOAD_PROBE_FLAGS_OFF   0x180
+#define PAYLOAD_PROBE_PAGE        0x413FF000ULL    /* 0x40400000 + 0x01000000 - 0x1000 */
+
 #pragma pack(1)
+typedef struct {
+  UINT64  Magic;
+  UINT64  Destination;
+  UINT64  Size;
+  UINT64  RecSig;
+  UINT64  RecName;
+  UINT64  RecFlags;
+  UINT64  Entry;
+} PAYLOAD_PROBE_BLOCK;
+
 typedef struct {
   VENDOR_DEVICE_PATH          Vendor;
   EFI_DEVICE_PATH_PROTOCOL    End;
@@ -210,61 +245,14 @@ STATIC EFI_BLOCK_IO_PROTOCOL  mBlockIo = {
 };
 
 STATIC
-VOID
-PublishInitrd (
-  IN CONST VOID  *Fdt
+EFI_STATUS
+PublishBuffer (
+  IN UINT64  Start,
+  IN UINT64  End
   )
 {
   EFI_STATUS  Status;
-  INT32       Chosen;
-  CONST VOID  *StartProp;
-  CONST VOID  *EndProp;
-  INT32       StartLength;
-  INT32       EndLength;
-  UINT64      Start;
-  UINT64      End;
   EFI_HANDLE  Handle;
-
-  Chosen = FdtPathOffset (Fdt, "/chosen");
-  if (Chosen < 0) {
-    DiagInfo ("no /chosen in dtb");
-    return;
-  }
-
-  StartProp = FdtGetProp (Fdt, Chosen, "linux,initrd-start", &StartLength);
-  EndProp   = FdtGetProp (Fdt, Chosen, "linux,initrd-end", &EndLength);
-  if ((StartProp == NULL) || (EndProp == NULL) ||
-      ((StartLength != 4) && (StartLength != 8)) || ((EndLength != 4) && (EndLength != 8)))
-  {
-    DiagInfo ("no initrd in chosen (sl=%d el=%d)", StartLength, EndLength);
-    return;
-  }
-
-  Start = ReadCells (StartProp, StartLength / 4);
-  End   = ReadCells (EndProp, EndLength / 4);
-  if ((End <= Start) || !InsideRegion ("Boot Ramdisk", Start, End - Start)) {
-    DiagInfo ("initrd %lx-%lx outside Boot Ramdisk", Start, End);
-    return;
-  }
-
-  // The stock LK already strips the header; skip one left in place.
-  if ((End - Start > MTK_HEADER_SIZE) &&
-      (ReadUnaligned32 ((VOID *)(UINTN)Start) == MTK_HEADER_MAGIC))
-  {
-    UINT32  PayloadSize;
-
-    PayloadSize = ReadUnaligned32 ((VOID *)(UINTN)(Start + 4));
-    DiagInfo ("mtk header at %lx, payload %x", Start, PayloadSize);
-    Start += MTK_HEADER_SIZE;
-    if ((PayloadSize != 0) && (PayloadSize < End - Start)) {
-      End = Start + PayloadSize;
-    }
-  }
-
-  if (((End - Start) % RAM_BLOCK_SIZE) != 0) {
-    DiagInfo ("initrd %lx-%lx not sector aligned", Start, End);
-    return;
-  }
 
   mRamBase                = (UINT8 *)(UINTN)Start;
   mMedia.MediaId          = 1;
@@ -293,6 +281,238 @@ PublishInitrd (
     (UINT64)mMedia.LastBlock,
     Status
     );
+  return Status;
+}
+
+STATIC
+VOID
+WritePayloadProbe (
+  IN UINT64  Start,
+  IN UINT64  End
+  )
+{
+  PAYLOAD_PROBE_BLOCK  ProbeBlock;
+
+  ZeroMem (&ProbeBlock, sizeof (ProbeBlock));
+  ProbeBlock.Magic       = PAYLOAD_PROBE_MAGIC;
+  ProbeBlock.Destination = Start;
+  ProbeBlock.Size        = End - Start;
+  if (End - Start >= PAYLOAD_PROBE_VOL_REC + PAYLOAD_PROBE_FLAGS_OFF + 8) {
+    ProbeBlock.RecSig   = ReadUnaligned64 ((VOID *)(UINTN)(Start + PAYLOAD_PROBE_VOL_REC));
+    ProbeBlock.RecName  = ReadUnaligned64 ((VOID *)(UINTN)(Start + PAYLOAD_PROBE_VOL_REC + PAYLOAD_PROBE_NAME_OFF));
+    ProbeBlock.RecFlags = ReadUnaligned64 ((VOID *)(UINTN)(Start + PAYLOAD_PROBE_VOL_REC + PAYLOAD_PROBE_FLAGS_OFF));
+  }
+  if (End - Start >= PAYLOAD_PROBE_VOL_ENTRY + 8) {
+    ProbeBlock.Entry = ReadUnaligned64 ((VOID *)(UINTN)(Start + PAYLOAD_PROBE_VOL_ENTRY));
+  }
+  CopyMem ((VOID *)(UINTN)PAYLOAD_PROBE_PAGE, &ProbeBlock, sizeof (ProbeBlock));
+  DiagInfo (
+    "volume probe %lx/%lx/%lx entry %lx",
+    ProbeBlock.RecSig,
+    ProbeBlock.RecName,
+    ProbeBlock.RecFlags,
+    ProbeBlock.Entry
+    );
+}
+
+STATIC
+EFI_STATUS
+PublishPayload (
+  IN UINT64   Start,
+  IN UINT64   End,
+  IN BOOLEAN  AllowRaw
+  )
+{
+  EFI_STATUS            Status;
+  UINT32                CompressedSize;
+  UINT32                UncompressedSize;
+  UINT32                DestinationSize;
+  UINT32                ScratchSize;
+  EFI_PHYSICAL_ADDRESS  Destination;
+  EFI_PHYSICAL_ADDRESS  Scratch;
+
+  if ((End - Start >= COMPRESSED_PAYLOAD_HEADER_SIZE) &&
+      (ReadUnaligned32 ((VOID *)(UINTN)Start) == COMPRESSED_PAYLOAD_MAGIC))
+  {
+    UncompressedSize = ReadUnaligned32 ((VOID *)(UINTN)(Start + 4));
+    CompressedSize   = ReadUnaligned32 ((VOID *)(UINTN)(Start + 8));
+    if ((CompressedSize == 0) ||
+        ((UINT64)CompressedSize > End - Start - COMPRESSED_PAYLOAD_HEADER_SIZE))
+    {
+      DiagInfo ("compressed payload size %x bad", CompressedSize);
+      return EFI_INVALID_PARAMETER;
+    }
+
+    Status = UefiDecompressGetInfo (
+               (VOID *)(UINTN)(Start + COMPRESSED_PAYLOAD_HEADER_SIZE),
+               CompressedSize,
+               &DestinationSize,
+               &ScratchSize
+               );
+    if (EFI_ERROR (Status) || (DestinationSize == 0) ||
+        (DestinationSize != UncompressedSize))
+    {
+      DiagInfo (
+        "compressed payload info %r dest=%x want=%x",
+        Status,
+        DestinationSize,
+        UncompressedSize
+        );
+      return EFI_INVALID_PARAMETER;
+    }
+
+    if ((DestinationSize % RAM_BLOCK_SIZE) != 0) {
+      DiagInfo ("compressed payload %x not sector aligned", DestinationSize);
+      return EFI_INVALID_PARAMETER;
+    }
+
+    Destination = 0;
+    Status      = gBS->AllocatePages (
+                         AllocateAnyPages,
+                         EfiBootServicesData,
+                         EFI_SIZE_TO_PAGES (DestinationSize),
+                         &Destination
+                         );
+    if (EFI_ERROR (Status)) {
+      DiagInfo ("compressed payload alloc %r", Status);
+      return Status;
+    }
+
+    Scratch = 0;
+    if (ScratchSize != 0) {
+      Status = gBS->AllocatePages (
+                      AllocateAnyPages,
+                      EfiBootServicesData,
+                      EFI_SIZE_TO_PAGES (ScratchSize),
+                      &Scratch
+                      );
+      if (EFI_ERROR (Status)) {
+        gBS->FreePages (Destination, EFI_SIZE_TO_PAGES (DestinationSize));
+        DiagInfo ("compressed payload scratch %r", Status);
+        return Status;
+      }
+    }
+
+    Status = UefiDecompress (
+               (VOID *)(UINTN)(Start + COMPRESSED_PAYLOAD_HEADER_SIZE),
+               (VOID *)(UINTN)Destination,
+               (VOID *)(UINTN)Scratch
+               );
+    if (ScratchSize != 0) {
+      gBS->FreePages (Scratch, EFI_SIZE_TO_PAGES (ScratchSize));
+    }
+
+    if (EFI_ERROR (Status)) {
+      gBS->FreePages (Destination, EFI_SIZE_TO_PAGES (DestinationSize));
+      DiagInfo ("compressed payload decompress %r", Status);
+      return Status;
+    }
+
+    WritePayloadProbe (Destination, Destination + DestinationSize);
+
+    DiagInfo (
+      "compressed payload %x -> %x at %lx",
+      CompressedSize,
+      DestinationSize,
+      (UINT64)Destination
+      );
+    Start = Destination;
+    End   = Start + DestinationSize;
+  } else if (!AllowRaw) {
+    return EFI_NOT_FOUND;
+  } else {
+    // LK appends the init_boot ramdisk after the vendor ramdisk, so the
+    // /chosen range is not necessarily sector aligned. Round up within the
+    // reserved region; the FAT volume ends at its own BPB.
+    UINT64  AlignedEnd = ALIGN_VALUE (End, RAM_BLOCK_SIZE);
+
+    if (!InsideRegion ("Boot Ramdisk", Start, AlignedEnd - Start)) {
+      DiagInfo ("initrd %lx-%lx overflows Boot Ramdisk", Start, AlignedEnd);
+      return EFI_INVALID_PARAMETER;
+    }
+
+    if (AlignedEnd != End) {
+      DiagInfo ("initrd %lx-%lx rounded to %lx", Start, End, AlignedEnd);
+      End = AlignedEnd;
+    }
+
+    WritePayloadProbe (Start, End);
+  }
+
+  return PublishBuffer (Start, End);
+}
+
+STATIC
+EFI_STATUS
+PublishInitrd (
+  IN CONST VOID  *Fdt
+  )
+{
+  INT32       Chosen;
+  CONST VOID  *StartProp;
+  CONST VOID  *EndProp;
+  INT32       StartLength;
+  INT32       EndLength;
+  UINT64      Start;
+  UINT64      End;
+
+  Chosen = FdtPathOffset (Fdt, "/chosen");
+  if (Chosen < 0) {
+    DiagInfo ("no /chosen in dtb");
+    return EFI_NOT_FOUND;
+  }
+
+  StartProp = FdtGetProp (Fdt, Chosen, "linux,initrd-start", &StartLength);
+  EndProp   = FdtGetProp (Fdt, Chosen, "linux,initrd-end", &EndLength);
+  if ((StartProp == NULL) || (EndProp == NULL) ||
+      ((StartLength != 4) && (StartLength != 8)) || ((EndLength != 4) && (EndLength != 8)))
+  {
+    DiagInfo ("no initrd in chosen (sl=%d el=%d)", StartLength, EndLength);
+    return EFI_NOT_FOUND;
+  }
+
+  Start = ReadCells (StartProp, StartLength / 4);
+  End   = ReadCells (EndProp, EndLength / 4);
+  if ((End <= Start) || !InsideRegion ("Boot Ramdisk", Start, End - Start)) {
+    DiagInfo ("initrd %lx-%lx outside Boot Ramdisk", Start, End);
+    return EFI_NOT_FOUND;
+  }
+
+  // The stock LK already strips the header; skip one left in place.
+  if ((End - Start > MTK_HEADER_SIZE) &&
+      (ReadUnaligned32 ((VOID *)(UINTN)Start) == MTK_HEADER_MAGIC))
+  {
+    UINT32  PayloadSize;
+
+    PayloadSize = ReadUnaligned32 ((VOID *)(UINTN)(Start + 4));
+    DiagInfo ("mtk header at %lx, payload %x", Start, PayloadSize);
+    Start += MTK_HEADER_SIZE;
+    if ((PayloadSize != 0) && (PayloadSize < End - Start)) {
+      End = Start + PayloadSize;
+    }
+  }
+
+  return PublishPayload (Start, End, TRUE);
+}
+
+STATIC
+EFI_STATUS
+PublishEmbeddedPayload (
+  VOID
+  )
+{
+  EFI_MEMORY_REGION_DESCRIPTOR  Region;
+
+  if (EFI_ERROR (LocateMemoryRegionByName ("Boot Payload", &Region))) {
+    return EFI_NOT_FOUND;
+  }
+
+  if (ReadUnaligned32 ((VOID *)(UINTN)Region.Address) != COMPRESSED_PAYLOAD_MAGIC) {
+    return EFI_NOT_FOUND;
+  }
+
+  DiagInfo ("embedded payload at %lx", (UINT64)Region.Address);
+  return PublishPayload (Region.Address, Region.Address + Region.Length, FALSE);
 }
 
 EFI_STATUS
@@ -308,26 +528,28 @@ BootRamdiskDxeEntry (
   Hob = GetFirstGuidHob (&gSiliciumEntryArgHobGuid);
   if (Hob == NULL) {
     DiagInfo ("no entry argument hob");
+  } else {
+    Dtb = *(UINT64 *)GET_GUID_HOB_DATA (Hob);
+
+    // Only touch x0 when it points into the reserved LK DTB window.
+    if ((Dtb & 7) != 0 || !InsideRegion ("LK DTB", Dtb, sizeof (FDT_HEADER))) {
+      DiagInfo ("x0 %lx not in LK DTB", Dtb);
+    } else if ((FdtCheckHeader ((VOID *)(UINTN)Dtb) != 0) ||
+               !InsideRegion ("LK DTB", Dtb, FdtTotalSize ((VOID *)(UINTN)Dtb)))
+    {
+      DiagInfo ("x0 %lx not an fdt", Dtb);
+    } else {
+      DiagInfo ("dtb %lx size %x", Dtb, (UINT32)FdtTotalSize ((VOID *)(UINTN)Dtb));
+      if (PublishInitrd ((VOID *)(UINTN)Dtb) != EFI_NOT_FOUND) {
+        return EFI_SUCCESS;
+      }
+    }
+  }
+
+  // Fallback for kernels whose payload still rides in the FD gzip stream.
+  if (PublishEmbeddedPayload () != EFI_NOT_FOUND) {
     return EFI_SUCCESS;
   }
 
-  Dtb = *(UINT64 *)GET_GUID_HOB_DATA (Hob);
-
-  // Only touch x0 when it points into the reserved LK DTB window.
-  if ((Dtb & 7) != 0 || !InsideRegion ("LK DTB", Dtb, sizeof (FDT_HEADER))) {
-    DiagInfo ("x0 %lx not in LK DTB", Dtb);
-    return EFI_SUCCESS;
-  }
-
-  if ((FdtCheckHeader ((VOID *)(UINTN)Dtb) != 0) ||
-      !InsideRegion ("LK DTB", Dtb, FdtTotalSize ((VOID *)(UINTN)Dtb)))
-  {
-    DiagInfo ("x0 %lx not an fdt", Dtb);
-    return EFI_SUCCESS;
-  }
-
-  DiagInfo ("dtb %lx size %x", Dtb, (UINT32)FdtTotalSize ((VOID *)(UINTN)Dtb));
-
-  PublishInitrd ((VOID *)(UINTN)Dtb);
   return EFI_SUCCESS;
 }

@@ -33,6 +33,7 @@
   MemoryMapHelperLib
   PrintLib
   UefiBootServicesTableLib
+  UefiDecompressLib
   UefiDriverEntryPoint
   UefiRuntimeServicesTableLib
 

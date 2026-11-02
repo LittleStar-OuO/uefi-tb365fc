@@ -35,10 +35,10 @@
   gArmTokenSpaceGuid.PcdSystemMemoryBase|0x40000000
 
   #
-  # UEFI Stack (see MemoryMapLib): right above the 4 MiB FD at 0x40000000,
-  # which is the kernel_addr LK reads from the stock vendor_boot header.
+  # UEFI Stack (see MemoryMapLib): above the 16 MiB boot payload window that
+  # follows the 4 MiB FD at kernel_addr 0x40000000.
   #
-  gArmPlatformTokenSpaceGuid.PcdCPUCoresStackBase|0x40400000
+  gArmPlatformTokenSpaceGuid.PcdCPUCoresStackBase|0x41400000
   gArmPlatformTokenSpaceGuid.PcdCPUCorePrimaryStackSize|0x40000
 
   #
@@ -106,6 +106,7 @@
   # Memory Libraries
   #
   MemoryMapLib|tb365fcPkg/Library/MemoryMapLib/MemoryMapLib.inf
+  UefiDecompressLib|MdePkg/Library/BaseUefiDecompressLib/BaseUefiDecompressLib.inf
 
   #
   # Keypad Device

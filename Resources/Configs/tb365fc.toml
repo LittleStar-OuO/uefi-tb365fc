@@ -14,8 +14,9 @@
 # address. No Boot Shim is needed because kernel_addr is the FD base.
 #
 # The FD window lies at the start of the LK kernel mblock
-# (0x40000000-0x47C80000) and must match tb365fc.dsc (stack at 0x40400000)
-# and MemoryMapLib.
+# (0x40000000-0x47C80000) and must match tb365fc.dsc (stack at 0x41400000,
+# above the 16 MiB payload window) and MemoryMapLib. The boot image kernel is
+# gzip(FD || UniXNU payload): LK decompresses both to 0x40000000.
 #
 
 #

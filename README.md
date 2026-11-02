@@ -28,8 +28,8 @@ TB365FC firmware and the live device.
 | Area | State |
 | --- | --- |
 | EDK II package / DSC / FDF | builds DEBUG from the shared MT6835 profile; FD is 4 MiB at 0x40000000 |
-| Boot path | Android boot v4, gzip kernel = FD; LK decompresses to kernel_addr 0x40000000; flashed to `boot_a` on the development unit |
-| Memory map | FD 0x40000000-0x40400000, primary stack at 0x40400000; the LK reservations (DTB 0x47C80000, ramdisk 0x66F00000) are left alone |
+| Boot path | Android boot v4, gzip kernel = FD followed by the compressed UniXNU payload; LK decompresses both to kernel_addr 0x40000000; flashed to `boot_a` on the development unit |
+| Memory map | FD 0x40000000-0x40400000, payload window 0x40400000-0x41400000, primary stack at 0x41400000; the LK reservations (DTB 0x47C80000, ramdisk 0x66F00000) are left alone |
 | DRAM | 8 GiB from 0x40000000; `MemoryMapLib` keeps the placeholder split because the stock DTB only carries a 1 GiB LK stub |
 | Display | stock LK scanout 1600x2560x32 at 0xFCF2B000 reused through `SimpleFbDxe`; logo and menu verified on hardware, panel is BOE HX83122B |
 | Storage | UFS 2.2 (`PcdStorageIsEMMC = FALSE`); the UEFI does not drive the UFS yet |
